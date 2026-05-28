@@ -13,8 +13,9 @@ python -m pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
-For summarization, provide a local GGUF model supported by `llama.cpp`. A small
-instruct model quantized to Q4 is a practical starting point for a 4 GB GPU.
+For summarization, provide a Hugging Face GGUF model repo supported by
+`llama.cpp`. A small instruct model quantized to Q4 is a practical starting
+point for a 4 GB GPU.
 
 ## Usage
 
@@ -27,7 +28,7 @@ python -m novel_memory scrape --title "Practical Guide To Evil" --start-url "htt
 Summarize chapters and update character memory:
 
 ```powershell
-python -m novel_memory summarize --novel practical_guide_to_evil --model-path C:\models\model.gguf --gpu-layers 20
+python -m novel_memory summarize --novel practical_guide_to_evil --model-repo TheBloke/Mistral-7B-Instruct-v0.2-GGUF --model-file "*Q4_K_M.gguf" --gpu-layers 20
 ```
 
 Convert older `chapters_1_20.json` batch files into the new per-chapter layout:

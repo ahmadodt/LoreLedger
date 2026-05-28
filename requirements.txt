@@ -3,3 +3,4 @@ requests
 spacy
 pytest
 llama-cpp-python
+huggingface-hub

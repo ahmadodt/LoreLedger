@@ -19,7 +19,8 @@ class Summarizer(Protocol):
 
 @dataclass
 class LlamaCppSummarizer:
-    model_path: str
+    model_repo: str
+    model_file: str
     context_size: int = 4096
     gpu_layers: int = 20
     temperature: float = 0.2
@@ -30,11 +31,12 @@ class LlamaCppSummarizer:
             from llama_cpp import Llama
         except ImportError as exc:
             raise RuntimeError(
-                "llama-cpp-python is not installed. Install the environment from environment.yml first."
+                "llama-cpp-python is not installed. Install the environment from requirements.txt first."
             ) from exc
 
-        self._llm = Llama(
-            model_path=self.model_path,
+        self._llm = Llama.from_pretrained(
+            repo_id=self.model_repo,
+            filename=self.model_file,
             n_ctx=self.context_size,
             n_gpu_layers=self.gpu_layers,
             verbose=False,

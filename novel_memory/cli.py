@@ -22,7 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     summarize = subparsers.add_parser("summarize", help="Summarize chapters and update character memory.")
     summarize.add_argument("--novel", required=True, help="Novel slug, for example practical_guide_to_evil.")
-    summarize.add_argument("--model-path", required=True)
+    summarize.add_argument("--model-repo", required=True, help="Hugging Face model repo, for example TheBloke/Mistral-7B-Instruct-v0.2-GGUF.")
+    summarize.add_argument("--model-file", required=True, help="GGUF filename or pattern in the Hugging Face repo, for example *Q4_K_M.gguf.")
     summarize.add_argument("--context-size", type=int, default=4096)
     summarize.add_argument("--gpu-layers", type=int, default=20)
     summarize.add_argument("--temperature", type=float, default=0.2)
@@ -59,7 +60,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "summarize":
         base_dir = novel_dir(args.novel, output_root)
         summarizer = LlamaCppSummarizer(
-            model_path=args.model_path,
+            model_repo=args.model_repo,
+            model_file=args.model_file,
             context_size=args.context_size,
             gpu_layers=args.gpu_layers,
             temperature=args.temperature,
