@@ -1,0 +1,13 @@
+name: novel_memory
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - beautifulsoup4
+  - requests
+  - spacy
+  - pytest
+  - pip
+  - pip:
+      - llama-cpp-python
