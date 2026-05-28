@@ -6,8 +6,10 @@ memory that can be queried up to any chapter.
 ## Setup
 
 ```powershell
-conda env create -f environment.yml
-conda activate novel_memory
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
