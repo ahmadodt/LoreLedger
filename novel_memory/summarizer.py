@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from .io import read_json, write_json
 from .memory import update_character_memory
-from .paths import ensure_novel_dirs, summary_path
+from .paths import chapter_path, ensure_novel_dirs, summary_path
 from .scraper import iter_chapter_files
 
 
@@ -128,6 +128,48 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
         "important_events": [str(event).strip() for event in data.get("important_events", []) if str(event).strip()],
         "characters": characters,
     }
+
+
+def previous_cumulative_summary(base_dir: Path, before_chapter: int) -> str | None:
+    cumulative_summary: str | None = None
+
+    for path in sorted((base_dir / "summaries").glob("chapter_*.json")):
+        summary = read_json(path)
+        chapter_number = int(summary.get("chapter_number", 0))
+        if chapter_number >= before_chapter:
+            continue
+
+        chapter_summary = summary.get("chapter_summary", "")
+        if not chapter_summary:
+            continue
+
+        line = f"Chapter {chapter_number}: {chapter_summary}"
+        cumulative_summary = f"{cumulative_summary}\n{line}" if cumulative_summary else line
+
+    return cumulative_summary
+
+
+def summarize_chapter(
+    base_dir: Path,
+    chapter_number: int,
+    summarizer: Summarizer,
+    force: bool = False,
+) -> Path:
+    ensure_novel_dirs(base_dir)
+    in_path = chapter_path(base_dir, chapter_number)
+    if not in_path.exists():
+        raise FileNotFoundError(f"No chapter file found for chapter {chapter_number}.")
+
+    out_path = summary_path(base_dir, chapter_number)
+    if out_path.exists() and not force:
+        return out_path
+
+    chapter = read_json(in_path)
+    previous_summary = previous_cumulative_summary(base_dir, chapter_number)
+    summary = normalize_summary(summarizer.summarize_chapter(chapter, previous_summary), chapter)
+    write_json(out_path, summary)
+    update_character_memory(base_dir, summary)
+    return out_path
 
 
 def summarize_novel(base_dir: Path, summarizer: Summarizer, force: bool = False) -> list[Path]:

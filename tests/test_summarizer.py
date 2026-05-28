@@ -5,7 +5,7 @@ import sys
 
 from novel_memory.io import write_json
 from novel_memory.paths import ensure_novel_dirs
-from novel_memory.summarizer import FakeSummarizer, LlamaCppSummarizer, summarize_novel
+from novel_memory.summarizer import FakeSummarizer, LlamaCppSummarizer, summarize_chapter, summarize_novel
 
 
 def test_summarize_novel_writes_summary_and_character_memory(tmp_path: Path):
@@ -23,6 +23,61 @@ def test_summarize_novel_writes_summary_and_character_memory(tmp_path: Path):
     saved = summarize_novel(tmp_path, FakeSummarizer())
 
     assert saved == [tmp_path / "summaries" / "chapter_0001.json"]
+    assert (tmp_path / "characters" / "arn.json").exists()
+
+
+def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
+    ensure_novel_dirs(tmp_path)
+    write_json(
+        tmp_path / "chapters" / "chapter_0001.json",
+        {
+            "number": 1,
+            "title": "First",
+            "url": "https://example.test/1",
+            "text": "Arn enters the city.",
+        },
+    )
+    write_json(
+        tmp_path / "chapters" / "chapter_0002.json",
+        {
+            "number": 2,
+            "title": "Second",
+            "url": "https://example.test/2",
+            "text": "Arn meets Mira.",
+        },
+    )
+    write_json(
+        tmp_path / "summaries" / "chapter_0001.json",
+        {
+            "chapter_number": 1,
+            "chapter_title": "First",
+            "chapter_url": "https://example.test/1",
+            "chapter_summary": "Arn enters the city.",
+            "important_events": [],
+            "characters": [],
+        },
+    )
+    calls = {}
+
+    class CapturingSummarizer:
+        def summarize_chapter(self, chapter, previous_summary):
+            calls["previous_summary"] = previous_summary
+            return {
+                "chapter_summary": "Arn meets Mira.",
+                "important_events": ["Arn meets Mira."],
+                "characters": [
+                    {
+                        "name": "Arn",
+                        "aliases": [],
+                        "update": "Meets Mira in chapter 2.",
+                    }
+                ],
+            }
+
+    saved = summarize_chapter(tmp_path, 2, CapturingSummarizer())
+
+    assert saved == tmp_path / "summaries" / "chapter_0002.json"
+    assert calls["previous_summary"] == "Chapter 1: Arn enters the city."
     assert (tmp_path / "characters" / "arn.json").exists()
 
 
