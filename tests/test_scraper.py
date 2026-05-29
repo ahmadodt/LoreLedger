@@ -9,16 +9,18 @@ def test_extract_chapter_text_from_royalroad_markup():
     soup = BeautifulSoup(
         """
         <html><body>
+          <h1>Chapter 1: Start</h1>
           <div class="chapter-inner chapter-content">
+            <p>Chapter 1: Start</p>
             <p>First paragraph.</p>
-            <p>Second paragraph.</p>
+            <p>Second<br>paragraph.</p>
           </div>
         </body></html>
         """,
         "html.parser",
     )
 
-    assert extract_chapter_text(soup) == "First paragraph.\nSecond paragraph."
+    assert extract_chapter_text(soup) == "First paragraph.\n\nSecond paragraph."
 
 
 def test_extract_next_chapter_link_makes_absolute_url():

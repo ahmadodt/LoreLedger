@@ -28,15 +28,32 @@ def fetch_page(url: str, timeout: int = 30):
 
 
 def extract_chapter_text(soup) -> str:
-    chapter_content = soup.find("div", class_="chapter-inner chapter-content")
+    chapter_content = soup.select_one("div.chapter-inner.chapter-content")
     if chapter_content is None:
         raise ValueError("Could not find RoyalRoad chapter content.")
 
-    paragraphs = [paragraph.get_text(" ", strip=True) for paragraph in chapter_content.find_all("p")]
-    text = "\n".join(paragraph for paragraph in paragraphs if paragraph)
-    if not text:
+    title = extract_chapter_title(soup, fallback="").strip()
+    paragraphs = []
+
+    for paragraph in chapter_content.find_all("p", recursive=False):
+        for br in paragraph.find_all("br"):
+            br.replace_with("\n")
+
+        text = paragraph.get_text(" ", strip=True)
+        text = text.replace("\xa0", " ").strip()
+
+        if not text:
+            continue
+
+        if title and text == title:
+            continue
+
+        paragraphs.append(text)
+
+    if not paragraphs:
         raise ValueError("RoyalRoad chapter content was found, but it contained no paragraph text.")
-    return text
+
+    return "\n\n".join(paragraphs)
 
 
 def extract_chapter_title(soup, fallback: str) -> str:
