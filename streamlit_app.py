@@ -185,8 +185,27 @@ with tabs[0]:
         st.subheader("Add chapters")
         title = st.text_input("Novel title", placeholder="Practical Guide To Evil")
         start_url = st.text_input("First chapter URL", placeholder="https://www.royalroad.com/fiction/...")
-        max_chapters = st.number_input("Chapter limit", min_value=1, max_value=500, value=5, step=1)
-        delay_seconds = st.slider("Delay between chapters", min_value=0.0, max_value=5.0, value=1.0, step=0.25)
+        scrape_until_end = st.toggle(
+            "Scrape until no next chapter",
+            value=False,
+            help="Ignore the chapter limit and keep following RoyalRoad's next chapter link until it stops.",
+        )
+        max_chapters = st.number_input(
+            "Chapter limit",
+            min_value=1,
+            max_value=500,
+            value=5,
+            step=1,
+            disabled=scrape_until_end,
+        )
+        delay_seconds = st.slider(
+            "Scrape delay between chapters",
+            min_value=0.0,
+            max_value=5.0,
+            value=1.0,
+            step=0.25,
+            help="Seconds to wait between RoyalRoad chapter requests.",
+        )
 
         if st.button("Scrape", type="primary", use_container_width=True):
             if not title.strip() or not start_url.strip():
@@ -197,7 +216,7 @@ with tabs[0]:
                         saved = scrape_royalroad(
                             title=title.strip(),
                             start_url=start_url.strip(),
-                            max_chapters=int(max_chapters),
+                            max_chapters=None if scrape_until_end else int(max_chapters),
                             delay_seconds=float(delay_seconds),
                             output_root=output_root,
                         )

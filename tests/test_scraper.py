@@ -2,7 +2,29 @@ import pytest
 
 BeautifulSoup = pytest.importorskip("bs4").BeautifulSoup
 
-from novel_memory.scraper import extract_chapter_text, extract_next_chapter_link
+from novel_memory.scraper import extract_chapter_text, extract_next_chapter_link, fetch_page
+
+
+def test_fetch_page_decodes_royalroad_html_as_utf8(monkeypatch):
+    class FakeResponse:
+        encoding = "ISO-8859-1"
+        content = "<html><body><p>“quoted”</p></body></html>".encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+        @property
+        def text(self):
+            return self.content.decode(self.encoding)
+
+    def fake_get(url, timeout, headers):
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    soup = fetch_page("https://www.royalroad.com/example")
+
+    assert soup.get_text(strip=True) == "“quoted”"
 
 
 def test_extract_chapter_text_from_royalroad_markup():
