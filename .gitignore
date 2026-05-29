@@ -1,5 +1,6 @@
 myenv/
 .venv/
+.env
 novels_extracted/
 __pycache__/
 *.py[cod]

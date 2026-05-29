@@ -5,6 +5,7 @@ from typing import Any
 
 import streamlit as st
 
+from novel_memory.env import load_project_env
 from novel_memory.io import read_json
 from novel_memory.memory import character_summary_until
 from novel_memory.paths import OUTPUT_ROOT, ensure_novel_dirs, novel_dir
@@ -13,6 +14,7 @@ from novel_memory.scraper import iter_chapter_files, scrape_royalroad
 from novel_memory.summarizer import LlamaCppSummarizer, summarize_chapter
 
 
+load_project_env()
 st.set_page_config(page_title="LoreLedger", page_icon="LL", layout="wide")
 
 

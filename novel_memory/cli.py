@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .env import load_project_env
 from .memory import character_summary_until
 from .paths import novel_dir
+from .rag import LlamaCppStoryAnswerer, answer_question, build_rag_index
 from .scraper import migrate_legacy_batches, scrape_royalroad
 from .summarizer import LlamaCppSummarizer, summarize_novel
 
@@ -39,10 +41,25 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--title")
     migrate.add_argument("--force", action="store_true")
 
+    index_rag = subparsers.add_parser("index-rag", help="Build the local RAG index for a novel.")
+    index_rag.add_argument("--novel", required=True)
+    index_rag.add_argument("--force", action="store_true")
+
+    ask = subparsers.add_parser("ask", help="Ask a grounded question about a scraped novel.")
+    ask.add_argument("--novel", required=True)
+    ask.add_argument("--question", required=True)
+    ask.add_argument("--model-repo", required=True, help="Hugging Face GGUF model repo.")
+    ask.add_argument("--model-file", required=True, help="GGUF filename or pattern in the Hugging Face repo.")
+    ask.add_argument("--context-size", type=int, default=4096)
+    ask.add_argument("--gpu-layers", type=int, default=20)
+    ask.add_argument("--temperature", type=float, default=0.2)
+    ask.add_argument("--top-k", type=int, default=5)
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    load_project_env()
     args = build_parser().parse_args(argv)
     output_root = Path(args.output_root)
 
@@ -79,6 +96,26 @@ def main(argv: list[str] | None = None) -> None:
         base_dir = novel_dir(args.novel, output_root)
         saved = migrate_legacy_batches(base_dir, title=args.title, force=args.force)
         print(f"Migrated {len(saved)} chapter file(s).")
+        return
+
+    if args.command == "index-rag":
+        base_dir = novel_dir(args.novel, output_root)
+        path = build_rag_index(base_dir, force=args.force)
+        print(f"Saved RAG index to {path}.")
+        return
+
+    if args.command == "ask":
+        base_dir = novel_dir(args.novel, output_root)
+        build_rag_index(base_dir)
+        answerer = LlamaCppStoryAnswerer(
+            model_repo=args.model_repo,
+            model_file=args.model_file,
+            context_size=args.context_size,
+            gpu_layers=args.gpu_layers,
+            temperature=args.temperature,
+        )
+        result = answer_question(base_dir, args.question, answerer, top_k=args.top_k)
+        print(result["answer"])
         return
 
     raise AssertionError(f"Unhandled command: {args.command}")
