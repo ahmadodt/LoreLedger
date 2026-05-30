@@ -69,6 +69,15 @@ class LlamaCppStoryAnswerer:
         )
         return str(result["choices"][0]["text"]).strip()
 
+    def close(self) -> None:
+        llm = getattr(self, "_llm", None)
+        if llm is None:
+            return
+        close = getattr(llm, "close", None)
+        if callable(close):
+            close()
+        self._llm = None
+
 
 class FakeStoryAnswerer:
     def answer_question(self, question: str, contexts: list[RetrievedContext]) -> str:

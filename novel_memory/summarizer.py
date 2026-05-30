@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .io import read_json, write_json
 from .memory import update_character_memory
@@ -15,6 +14,9 @@ from .scraper import iter_chapter_files
 class Summarizer(Protocol):
     def summarize_chapter(self, chapter: dict[str, Any], previous_summary: str | None) -> dict[str, Any]:
         ...
+
+
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass
@@ -52,6 +54,15 @@ class LlamaCppSummarizer:
         )
         text = result["choices"][0]["text"]
         return normalize_summary(parse_json_response(text), chapter)
+
+    def close(self) -> None:
+        llm = getattr(self, "_llm", None)
+        if llm is None:
+            return
+        close = getattr(llm, "close", None)
+        if callable(close):
+            close()
+        self._llm = None
 
 
 class FakeSummarizer:
@@ -101,13 +112,15 @@ JSON:
 
 def parse_json_response(text: str) -> dict[str, Any]:
     stripped = text.strip()
-    if stripped.startswith("{"):
-        return json.loads(stripped)
-
-    match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-    if not match:
+    start = stripped.find("{")
+    if start == -1:
         raise ValueError("The model did not return JSON.")
-    return json.loads(match.group(0))
+
+    decoder = json.JSONDecoder()
+    data, _end = decoder.raw_decode(stripped[start:])
+    if not isinstance(data, dict):
+        raise ValueError("The model did not return a JSON object.")
+    return data
 
 
 def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str, Any]:
@@ -154,6 +167,7 @@ def summarize_chapter(
     chapter_number: int,
     summarizer: Summarizer,
     force: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     ensure_novel_dirs(base_dir)
     in_path = chapter_path(base_dir, chapter_number)
@@ -162,32 +176,108 @@ def summarize_chapter(
 
     out_path = summary_path(base_dir, chapter_number)
     if out_path.exists() and not force:
+        _emit_progress(progress, "skipped", chapter_number=chapter_number, path=str(out_path))
         return out_path
 
+    _emit_progress(progress, "preparing chapter", chapter_number=chapter_number)
     chapter = read_json(in_path)
     previous_summary = previous_cumulative_summary(base_dir, chapter_number)
+    _emit_progress(progress, "generating summary", chapter_number=chapter_number)
     summary = normalize_summary(summarizer.summarize_chapter(chapter, previous_summary), chapter)
+    _emit_progress(progress, "saving summary", chapter_number=chapter_number)
     write_json(out_path, summary)
+    _emit_progress(progress, "updating character memory", chapter_number=chapter_number)
     update_character_memory(base_dir, summary)
+    _emit_progress(progress, "saved", chapter_number=chapter_number, path=str(out_path))
     return out_path
 
 
 def summarize_novel(base_dir: Path, summarizer: Summarizer, force: bool = False) -> list[Path]:
+    return summarize_chapter_range(base_dir, summarizer, force=force)
+
+
+def summarize_chapter_range(
+    base_dir: Path,
+    summarizer: Summarizer,
+    start_chapter: int | None = None,
+    end_chapter: int | None = None,
+    force: bool = False,
+    progress: ProgressCallback | None = None,
+) -> list[Path]:
     ensure_novel_dirs(base_dir)
     saved_paths: list[Path] = []
-    cumulative_summary: str | None = None
+    selected_chapters = []
 
     for chapter_file in iter_chapter_files(base_dir):
         chapter = read_json(chapter_file)
+        chapter_number = int(chapter["number"])
+        if start_chapter is not None and chapter_number < start_chapter:
+            continue
+        if end_chapter is not None and chapter_number > end_chapter:
+            continue
+        selected_chapters.append((chapter_file, chapter))
+
+    if not selected_chapters:
+        return saved_paths
+
+    first_chapter = int(selected_chapters[0][1]["number"])
+    cumulative_summary = previous_cumulative_summary(base_dir, first_chapter)
+
+    for index, (_chapter_file, chapter) in enumerate(selected_chapters, start=1):
+        chapter_number = int(chapter["number"])
+        _emit_progress(
+            progress,
+            "preparing chapter",
+            chapter_number=chapter_number,
+            completed=index - 1,
+            total=len(selected_chapters),
+        )
         out_path = summary_path(base_dir, int(chapter["number"]))
 
         if out_path.exists() and not force:
             summary = read_json(out_path)
+            _emit_progress(
+                progress,
+                "skipped",
+                chapter_number=chapter_number,
+                completed=index,
+                total=len(selected_chapters),
+                path=str(out_path),
+            )
         else:
-            summary = summarizer.summarize_chapter(chapter, cumulative_summary)
+            _emit_progress(
+                progress,
+                "generating summary",
+                chapter_number=chapter_number,
+                completed=index - 1,
+                total=len(selected_chapters),
+            )
+            summary = normalize_summary(summarizer.summarize_chapter(chapter, cumulative_summary), chapter)
+            _emit_progress(
+                progress,
+                "saving summary",
+                chapter_number=chapter_number,
+                completed=index - 1,
+                total=len(selected_chapters),
+            )
             write_json(out_path, summary)
+            _emit_progress(
+                progress,
+                "updating character memory",
+                chapter_number=chapter_number,
+                completed=index - 1,
+                total=len(selected_chapters),
+            )
             update_character_memory(base_dir, summary)
             saved_paths.append(out_path)
+            _emit_progress(
+                progress,
+                "saved",
+                chapter_number=chapter_number,
+                completed=index,
+                total=len(selected_chapters),
+                path=str(out_path),
+            )
 
         chapter_summary = summary.get("chapter_summary", "")
         if chapter_summary:
@@ -198,3 +288,9 @@ def summarize_novel(base_dir: Path, summarizer: Summarizer, force: bool = False)
             )
 
     return saved_paths
+
+
+def _emit_progress(progress: ProgressCallback | None, step: str, **payload: Any) -> None:
+    if progress is None:
+        return
+    progress({"step": step, **payload})

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,13 @@ from novel_memory.memory import character_summary_until
 from novel_memory.paths import OUTPUT_ROOT, ensure_novel_dirs, novel_dir
 from novel_memory.rag import FakeStoryAnswerer, LlamaCppStoryAnswerer, answer_question, build_rag_index, retrieve_context
 from novel_memory.scraper import iter_chapter_files, scrape_royalroad
-from novel_memory.summarizer import LlamaCppSummarizer, summarize_chapter
+from novel_memory.summarization_jobs import (
+    elapsed_seconds,
+    get_summarization_status,
+    start_summarization_job,
+    unload_local_models,
+)
+from novel_memory.summarizer import LlamaCppSummarizer
 
 
 load_project_env()
@@ -95,6 +102,56 @@ def chapter_label(chapter: dict[str, Any]) -> str:
 
 def novel_label(novel: dict[str, Any]) -> str:
     return f"{novel['title']} ({novel['chapter_count']} chapters)"
+
+
+def format_elapsed(seconds: int) -> str:
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def render_summary(summary: dict[str, Any]) -> None:
+    st.success("Summary exists.")
+    st.write(summary.get("chapter_summary", ""))
+    if summary.get("important_events"):
+        st.write("Important events")
+        for event in summary["important_events"]:
+            st.write(f"- {event}")
+
+
+def render_job_status(status: dict[str, Any]) -> None:
+    state = str(status.get("status", "unknown"))
+    total = int(status.get("total") or 0)
+    completed = int(status.get("completed") or 0)
+    current = status.get("current_chapter")
+    step = status.get("step") or "unknown"
+    skipped = int(status.get("skipped") or 0)
+    failed = int(status.get("failed") or 0)
+    elapsed = format_elapsed(elapsed_seconds(status))
+
+    if state == "running":
+        st.info(f"Summarization running: {step}")
+        st.progress(completed / total if total else 0.0)
+    elif state == "finished":
+        st.success("Summarization finished.")
+    elif state == "failed":
+        st.error(f"Summarization failed: {status.get('error')}")
+    elif state == "stale":
+        st.warning("Last summarization status is stale. No active job is running.")
+
+    cols = st.columns(4)
+    cols[0].metric("Progress", f"{completed}/{total}")
+    cols[1].metric("Current", current or "-")
+    cols[2].metric("Skipped", skipped)
+    cols[3].metric("Elapsed", elapsed)
+    if failed:
+        st.caption(f"Failed chapters: {failed}")
+    if status.get("last_saved_summary"):
+        st.caption(f"Last saved: {Path(status['last_saved_summary']).name}")
 
 
 def local_model_config() -> dict[str, Any]:
@@ -248,6 +305,9 @@ with st.sidebar:
     if summarization_enabled:
         force_summary = st.checkbox("Regenerate existing summary", value=False)
         summarizer_config = local_model_config()
+        if st.button("Unload local model", use_container_width=True):
+            unload_local_models()
+            st.success("Requested local model unload.")
     else:
         st.caption("Scrape and read chapters without generating summaries.")
 
@@ -325,6 +385,8 @@ with tabs[1]:
         base_dir = novel_dir(selected_novel["slug"], output_root)
         ensure_novel_dirs(base_dir)
         chapters = load_chapters(base_dir)
+        job_status = get_summarization_status(base_dir)
+        job_running = bool(job_status and job_status.get("status") == "running")
 
         metric_cols = st.columns(3)
         metric_cols[0].metric("Chapters", selected_novel["chapter_count"])
@@ -347,30 +409,70 @@ with tabs[1]:
                 st.subheader("Summarization")
                 summary_path = base_dir / "summaries" / f"chapter_{chapter['number']:04d}.json"
                 if summary_path.exists():
-                    summary = read_json(summary_path)
-                    st.success("Summary exists.")
-                    st.write(summary.get("chapter_summary", ""))
-                    if summary.get("important_events"):
-                        st.write("Important events")
-                        for event in summary["important_events"]:
-                            st.write(f"- {event}")
+                    render_summary(read_json(summary_path))
                 else:
                     st.warning("No summary yet.")
 
+                if job_status:
+                    render_job_status(job_status)
+
                 if not summarization_enabled:
                     st.info("Summarization is disabled. Enable it in the sidebar to generate summaries.")
-                elif st.button("Summarize selected chapter", type="primary", use_container_width=True):
+                elif st.button(
+                    "Summarize selected chapter",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=job_running,
+                ):
                     try:
-                        with st.spinner("Summarizing chapter..."):
-                            path = summarize_chapter(
-                                base_dir,
-                                int(chapter["number"]),
-                                build_summarizer(summarizer_config),
-                                force=force_summary,
-                            )
-                        st.success(f"Saved {path.name}.")
+                        start_summarization_job(
+                            base_dir=base_dir,
+                            novel_slug=selected_novel["slug"],
+                            model_config=summarizer_config,
+                            start_chapter=int(chapter["number"]),
+                            end_chapter=int(chapter["number"]),
+                            force=force_summary,
+                        )
+                        st.rerun()
                     except Exception as exc:
                         st.error(f"Summary failed: {exc}")
+
+                if summarization_enabled:
+                    chapter_numbers = [int(item["number"]) for item in chapters]
+                    min_chapter = min(chapter_numbers)
+                    max_chapter = max(chapter_numbers)
+                    st.divider()
+                    st.write("Batch range")
+                    range_cols = st.columns(2)
+                    with range_cols[0]:
+                        start_chapter = st.number_input(
+                            "From chapter",
+                            min_value=min_chapter,
+                            max_value=max_chapter,
+                            value=int(chapter["number"]),
+                            step=1,
+                        )
+                    with range_cols[1]:
+                        end_chapter = st.number_input(
+                            "To chapter",
+                            min_value=min_chapter,
+                            max_value=max_chapter,
+                            value=max_chapter,
+                            step=1,
+                        )
+                    if st.button("Summarize range", use_container_width=True, disabled=job_running):
+                        try:
+                            start_summarization_job(
+                                base_dir=base_dir,
+                                novel_slug=selected_novel["slug"],
+                                model_config=summarizer_config,
+                                start_chapter=int(start_chapter),
+                                end_chapter=int(end_chapter),
+                                force=force_summary,
+                            )
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Batch summary failed: {exc}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
 with tabs[2]:
@@ -447,12 +549,18 @@ with tabs[3]:
                     try:
                         with st.spinner("Retrieving context and answering..."):
                             build_rag_index(base_dir)
-                            result = answer_question(
-                                base_dir,
-                                question.strip(),
-                                build_story_answerer(summarizer_config),
-                                top_k=int(top_k),
-                            )
+                            answerer = build_story_answerer(summarizer_config)
+                            try:
+                                result = answer_question(
+                                    base_dir,
+                                    question.strip(),
+                                    answerer,
+                                    top_k=int(top_k),
+                                )
+                            finally:
+                                close = getattr(answerer, "close", None)
+                                if callable(close):
+                                    close()
                         st.write(result["answer"])
                     except Exception as exc:
                         st.error(f"Question failed: {exc}")
@@ -472,3 +580,14 @@ with tabs[3]:
                     st.write(context.text[:450])
             except Exception as exc:
                 st.error(str(exc))
+
+active_status = None
+for novel in load_novels(output_root):
+    candidate = get_summarization_status(novel_dir(novel["slug"], output_root))
+    if candidate and candidate.get("status") == "running":
+        active_status = candidate
+        break
+
+if active_status:
+    time.sleep(1)
+    st.rerun()

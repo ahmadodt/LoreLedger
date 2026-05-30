@@ -2,10 +2,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import sys
+import time
 
-from novel_memory.io import write_json
+from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
-from novel_memory.summarizer import FakeSummarizer, LlamaCppSummarizer, summarize_chapter, summarize_novel
+from novel_memory.summarization_jobs import get_summarization_status, start_summarization_job
+from novel_memory.summarizer import (
+    FakeSummarizer,
+    LlamaCppSummarizer,
+    parse_json_response,
+    summarize_chapter,
+    summarize_chapter_range,
+    summarize_novel,
+)
 
 
 def test_summarize_novel_writes_summary_and_character_memory(tmp_path: Path):
@@ -106,3 +115,146 @@ def test_llama_cpp_summarizer_loads_hugging_face_gguf(monkeypatch):
         "n_gpu_layers": 12,
         "verbose": False,
     }
+
+
+def test_parse_json_response_allows_trailing_model_text():
+    parsed = parse_json_response(
+        """
+        {
+          "chapter_summary": "Chloe wakes up.",
+          "important_events": ["Chloe wakes up."],
+          "characters": []
+        }
+        Here is the requested summary.
+        """
+    )
+
+    assert parsed["chapter_summary"] == "Chloe wakes up."
+
+
+def test_summarize_chapter_range_skips_existing_by_default(tmp_path: Path):
+    _write_chapters(tmp_path, count=3)
+    write_json(
+        tmp_path / "summaries" / "chapter_0002.json",
+        {
+            "chapter_number": 2,
+            "chapter_title": "Chapter 2",
+            "chapter_url": "https://example.test/2",
+            "chapter_summary": "Already summarized.",
+            "important_events": [],
+            "characters": [],
+        },
+    )
+    events = []
+
+    saved = summarize_chapter_range(
+        tmp_path,
+        FakeSummarizer(),
+        start_chapter=2,
+        end_chapter=3,
+        progress=events.append,
+    )
+
+    assert saved == [tmp_path / "summaries" / "chapter_0003.json"]
+    assert read_json(tmp_path / "summaries" / "chapter_0002.json")["chapter_summary"] == "Already summarized."
+    assert any(event["step"] == "skipped" and event["chapter_number"] == 2 for event in events)
+    assert any(event["step"] == "saved" and event["chapter_number"] == 3 for event in events)
+
+
+def test_summarize_chapter_range_regenerates_when_forced(tmp_path: Path):
+    _write_chapters(tmp_path, count=2)
+    write_json(
+        tmp_path / "summaries" / "chapter_0002.json",
+        {
+            "chapter_number": 2,
+            "chapter_title": "Chapter 2",
+            "chapter_url": "https://example.test/2",
+            "chapter_summary": "Old summary.",
+            "important_events": [],
+            "characters": [],
+        },
+    )
+
+    saved = summarize_chapter_range(tmp_path, FakeSummarizer(), start_chapter=2, end_chapter=2, force=True)
+
+    assert saved == [tmp_path / "summaries" / "chapter_0002.json"]
+    assert read_json(tmp_path / "summaries" / "chapter_0002.json")["chapter_summary"] == "Arn does thing 2"
+    assert (tmp_path / "characters" / "arn.json").exists()
+
+
+def test_llama_cpp_summarizer_close_releases_model(monkeypatch):
+    calls = {"closed": False}
+
+    class FakeLlama:
+        @classmethod
+        def from_pretrained(cls, **_kwargs):
+            return cls()
+
+        def close(self):
+            calls["closed"] = True
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+
+    summarizer = LlamaCppSummarizer(model_repo="example/model-GGUF", model_file="*Q4_K_M.gguf")
+    summarizer.close()
+
+    assert calls["closed"] is True
+
+
+def test_background_summarization_job_closes_model(tmp_path: Path, monkeypatch):
+    _write_chapters(tmp_path, count=1)
+    instances = []
+
+    class ClosingSummarizer:
+        def __init__(self, **_kwargs):
+            self.closed = False
+            instances.append(self)
+
+        def summarize_chapter(self, chapter, previous_summary):
+            return {
+                "chapter_summary": f"Summary for {chapter['number']}",
+                "important_events": [],
+                "characters": [],
+            }
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("novel_memory.summarization_jobs.LlamaCppSummarizer", ClosingSummarizer)
+
+    status = start_summarization_job(
+        tmp_path,
+        novel_slug="example",
+        model_config={
+            "model_repo": "example/model-GGUF",
+            "model_file": "*Q4_K_M.gguf",
+            "context_size": 2048,
+            "gpu_layers": 0,
+            "temperature": 0.2,
+        },
+        start_chapter=1,
+        end_chapter=1,
+    )
+
+    for _ in range(50):
+        status = get_summarization_status(tmp_path) or status
+        if status["status"] != "running":
+            break
+        time.sleep(0.02)
+
+    assert status["status"] == "finished"
+    assert instances and instances[0].closed is True
+
+
+def _write_chapters(base_dir: Path, count: int) -> None:
+    ensure_novel_dirs(base_dir)
+    for number in range(1, count + 1):
+        write_json(
+            base_dir / "chapters" / f"chapter_{number:04d}.json",
+            {
+                "number": number,
+                "title": f"Chapter {number}",
+                "url": f"https://example.test/{number}",
+                "text": f"Arn does thing {number}. Then the chapter ends.",
+            },
+        )
