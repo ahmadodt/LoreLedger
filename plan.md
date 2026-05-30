@@ -336,3 +336,8 @@ It is an evolving story-memory system.
 The main challenge is:
 
 **How can an AI keep an accurate, useful, and continuously updated understanding of a fictional world as the story grows over hundreds or thousands of chapters?**
+
+
+
+
+*** a good idea to add, is an agent that could cathc poblems inside stories, example in the power system or in the story or in the progression or something missing, later we can delve deepr in this after i understand and refine the RAG
