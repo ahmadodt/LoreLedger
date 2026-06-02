@@ -143,11 +143,12 @@ def render_job_status(status: dict[str, Any]) -> None:
     elif state == "stale":
         st.warning("Last summarization status is stale. No active job is running.")
 
-    cols = st.columns(4)
-    cols[0].metric("Progress", f"{completed}/{total}")
-    cols[1].metric("Current", current or "-")
-    cols[2].metric("Skipped", skipped)
-    cols[3].metric("Elapsed", elapsed)
+    top_cols = st.columns(2)
+    top_cols[0].metric("Progress", f"{completed}/{total}")
+    top_cols[1].metric("Current", current or "-")
+    bottom_cols = st.columns(2)
+    bottom_cols[0].metric("Skipped", skipped)
+    bottom_cols[1].metric("Elapsed", elapsed)
     if failed:
         st.caption(f"Failed chapters: {failed}")
     if status.get("last_saved_summary"):
