@@ -13,6 +13,7 @@ from novel_memory.summarization_jobs import get_summarization_status, start_summ
 from novel_memory.summarizer import (
     FakeSummarizer,
     LlamaCppSummarizer,
+    build_prompt,
     parse_json_response,
     summarize_chapter,
     summarize_chapter_range,
@@ -133,6 +134,27 @@ def test_parse_json_response_allows_trailing_model_text():
     )
 
     assert parsed["chapter_summary"] == "Chloe wakes up."
+
+
+def test_build_prompt_guides_strict_story_memory_summary():
+    prompt = build_prompt(
+        {
+            "number": 7,
+            "title": "The Gate",
+            "url": "https://example.test/7",
+            "text": "Mira reveals the gate key is broken.",
+        },
+        "Chapter 6: Mira finds the gate key.",
+    )
+
+    assert "Return strict JSON only" in prompt
+    assert "Use only the provided chapter text for new facts" in prompt
+    assert "previous cumulative summary only for continuity" in prompt
+    assert "4-8 concise sentences" in prompt
+    assert "3-8 concrete events or state changes" in prompt
+    assert "status changes, goals, relationships, secrets, injuries, abilities, faction changes, or revelations" in prompt
+    assert "Chapter 7: The Gate" in prompt
+    assert "Chapter 6: Mira finds the gate key." in prompt
 
 
 def test_summarize_chapter_range_skips_existing_by_default(tmp_path: Path):

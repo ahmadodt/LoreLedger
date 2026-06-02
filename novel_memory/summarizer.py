@@ -87,16 +87,28 @@ class FakeSummarizer:
 
 def build_prompt(chapter: dict[str, Any], previous_summary: str | None) -> str:
     previous = previous_summary or "No previous chapter summary is available."
-    return f"""You summarize fiction chapters for a personal memory tool.
+    return f"""You summarize fiction chapters for LoreLedger, a personal story memory and retrieval tool.
 
-Return only valid JSON inside the requested shape:
+Use only the provided chapter text for new facts. Use the previous cumulative summary only for continuity and context.
+Do not invent events, motives, names, relationships, powers, or explanations that are not supported by the chapter.
+
+Return strict JSON only. Do not include markdown, comments, prose before the JSON, or prose after the JSON.
+Use this exact JSON shape:
 {{
-  "chapter_summary": "short summary of this chapter",
-  "important_events": ["event 1", "event 2"],
+  "chapter_summary": "4-8 concise sentences summarizing this chapter",
+  "important_events": ["concrete event or state change 1", "concrete event or state change 2"],
   "characters": [
-    {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "what changed or was revealed in this chapter"}}
+    {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter"}}
   ]
 }}
+
+Guidelines:
+- chapter_summary should preserve plot progression, consequences, reveals, decisions, conflicts, and unresolved hooks.
+- important_events should contain 3-8 concrete events or state changes that matter after this chapter.
+- characters should include only characters with meaningful new information in this chapter.
+- character updates should capture status changes, goals, relationships, secrets, injuries, abilities, faction changes, or revelations.
+- Keep names, aliases, titles, groups, places, and artifacts as written in the chapter when possible.
+- If a field has no supported content, use an empty string or empty array as appropriate.
 
 Previous cumulative summary:
 {previous}
