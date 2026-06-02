@@ -4,6 +4,9 @@ from types import SimpleNamespace
 import sys
 import time
 
+import pytest
+
+from novel_memory import power
 from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
 from novel_memory.summarization_jobs import get_summarization_status, start_summarization_job
@@ -199,6 +202,32 @@ def test_llama_cpp_summarizer_close_releases_model(monkeypatch):
     summarizer.close()
 
     assert calls["closed"] is True
+
+
+def test_prevent_system_sleep_uses_windows_execution_state(monkeypatch):
+    calls = []
+    monkeypatch.setattr(power.sys, "platform", "win32")
+    monkeypatch.setattr(power, "_set_thread_execution_state", calls.append)
+
+    with power.prevent_system_sleep():
+        assert calls == [power.ES_CONTINUOUS | power.ES_SYSTEM_REQUIRED]
+
+    assert calls == [
+        power.ES_CONTINUOUS | power.ES_SYSTEM_REQUIRED,
+        power.ES_CONTINUOUS,
+    ]
+
+
+def test_prevent_system_sleep_restores_after_error(monkeypatch):
+    calls = []
+    monkeypatch.setattr(power.sys, "platform", "win32")
+    monkeypatch.setattr(power, "_set_thread_execution_state", calls.append)
+
+    with pytest.raises(RuntimeError):
+        with power.prevent_system_sleep():
+            raise RuntimeError("model failed")
+
+    assert calls[-1] == power.ES_CONTINUOUS
 
 
 def test_background_summarization_job_closes_model(tmp_path: Path, monkeypatch):

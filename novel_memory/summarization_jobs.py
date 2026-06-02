@@ -10,6 +10,7 @@ from typing import Any
 
 from .io import read_json, write_json
 from .paths import ensure_novel_dirs
+from .power import prevent_system_sleep
 from .scraper import iter_chapter_files
 from .summarizer import LlamaCppSummarizer, summarize_chapter_range
 
@@ -98,50 +99,51 @@ def _run_job(
     force: bool,
 ) -> None:
     summarizer: LlamaCppSummarizer | None = None
-    try:
-        _update_status(base_dir, step="loading model")
-        summarizer = LlamaCppSummarizer(
-            model_repo=model_config["model_repo"],
-            model_file=model_config["model_file"],
-            context_size=int(model_config["context_size"]),
-            gpu_layers=int(model_config["gpu_layers"]),
-            temperature=float(model_config["temperature"]),
-        )
+    with prevent_system_sleep():
+        try:
+            _update_status(base_dir, step="loading model")
+            summarizer = LlamaCppSummarizer(
+                model_repo=model_config["model_repo"],
+                model_file=model_config["model_file"],
+                context_size=int(model_config["context_size"]),
+                gpu_layers=int(model_config["gpu_layers"]),
+                temperature=float(model_config["temperature"]),
+            )
 
-        def progress(event: dict[str, Any]) -> None:
-            updates: dict[str, Any] = {
-                "step": event["step"],
-                "current_chapter": event.get("chapter_number"),
-            }
-            if "completed" in event:
-                updates["completed"] = event["completed"]
-            if event["step"] == "skipped":
-                updates["skipped"] = int((_STATUS or {}).get("skipped", 0)) + 1
-            if event["step"] == "saved":
-                updates["last_saved_summary"] = event.get("path")
-            _update_status(base_dir, **updates)
+            def progress(event: dict[str, Any]) -> None:
+                updates: dict[str, Any] = {
+                    "step": event["step"],
+                    "current_chapter": event.get("chapter_number"),
+                }
+                if "completed" in event:
+                    updates["completed"] = event["completed"]
+                if event["step"] == "skipped":
+                    updates["skipped"] = int((_STATUS or {}).get("skipped", 0)) + 1
+                if event["step"] == "saved":
+                    updates["last_saved_summary"] = event.get("path")
+                _update_status(base_dir, **updates)
 
-        saved_paths = summarize_chapter_range(
-            base_dir,
-            summarizer,
-            start_chapter=start_chapter,
-            end_chapter=end_chapter,
-            force=force,
-            progress=progress,
-        )
-        _update_status(
-            base_dir,
-            status="finished",
-            step="finished",
-            completed=int((_STATUS or {}).get("total", 0)),
-            last_saved_summary=str(saved_paths[-1]) if saved_paths else (_STATUS or {}).get("last_saved_summary"),
-        )
-    except Exception as exc:
-        _update_status(base_dir, status="failed", step="failed", failed=1, error=str(exc))
-    finally:
-        if summarizer is not None:
-            summarizer.close()
-        unload_local_models()
+            saved_paths = summarize_chapter_range(
+                base_dir,
+                summarizer,
+                start_chapter=start_chapter,
+                end_chapter=end_chapter,
+                force=force,
+                progress=progress,
+            )
+            _update_status(
+                base_dir,
+                status="finished",
+                step="finished",
+                completed=int((_STATUS or {}).get("total", 0)),
+                last_saved_summary=str(saved_paths[-1]) if saved_paths else (_STATUS or {}).get("last_saved_summary"),
+            )
+        except Exception as exc:
+            _update_status(base_dir, status="failed", step="failed", failed=1, error=str(exc))
+        finally:
+            if summarizer is not None:
+                summarizer.close()
+            unload_local_models()
 
 
 def _chapter_numbers_in_range(base_dir: Path, start_chapter: int, end_chapter: int) -> list[int]:
@@ -194,4 +196,3 @@ def elapsed_seconds(status: dict[str, Any]) -> int:
     except ValueError:
         return 0
     return max(0, int(time.time() - started.timestamp()))
-

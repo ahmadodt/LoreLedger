@@ -6,6 +6,7 @@ from pathlib import Path
 from .env import load_project_env
 from .memory import character_summary_until
 from .paths import novel_dir
+from .power import prevent_system_sleep
 from .rag import LlamaCppStoryAnswerer, answer_question, build_rag_index
 from .scraper import migrate_legacy_batches, scrape_royalroad
 from .summarizer import LlamaCppSummarizer, summarize_novel
@@ -76,14 +77,20 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.command == "summarize":
         base_dir = novel_dir(args.novel, output_root)
-        summarizer = LlamaCppSummarizer(
-            model_repo=args.model_repo,
-            model_file=args.model_file,
-            context_size=args.context_size,
-            gpu_layers=args.gpu_layers,
-            temperature=args.temperature,
-        )
-        saved = summarize_novel(base_dir, summarizer=summarizer, force=args.force)
+        summarizer = None
+        with prevent_system_sleep():
+            try:
+                summarizer = LlamaCppSummarizer(
+                    model_repo=args.model_repo,
+                    model_file=args.model_file,
+                    context_size=args.context_size,
+                    gpu_layers=args.gpu_layers,
+                    temperature=args.temperature,
+                )
+                saved = summarize_novel(base_dir, summarizer=summarizer, force=args.force)
+            finally:
+                if summarizer is not None:
+                    summarizer.close()
         print(f"Saved {len(saved)} new summary file(s).")
         return
 
