@@ -161,8 +161,8 @@ def local_model_config() -> dict[str, Any]:
         value="TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
     )
     model_file = st.sidebar.text_input("Model file", value="*Q4_K_M.gguf")
-    context_size = st.sidebar.number_input("Context size", min_value=512, max_value=32768, value=8192, step=512)
-    gpu_layers = st.sidebar.number_input("GPU layers", min_value=0, max_value=100, value=18, step=1)
+    context_size = st.sidebar.number_input("Context size", min_value=512, max_value=32768, value=16896, step=512)
+    gpu_layers = st.sidebar.number_input("GPU layers", min_value=0, max_value=100, value=20, step=1)
     temperature = st.sidebar.slider(
         "Generation randomness",
         min_value=0.0,
