@@ -52,6 +52,7 @@ def start_summarization_job(
             "completed": 0,
             "skipped": 0,
             "failed": 0,
+            "failed_chapters": [],
             "step": "queued",
             "started_at": now,
             "updated_at": now,
@@ -121,6 +122,11 @@ def _run_job(
                     updates["skipped"] = int((_STATUS or {}).get("skipped", 0)) + 1
                 if event["step"] == "saved":
                     updates["last_saved_summary"] = event.get("path")
+                if event["step"] == "failed":
+                    failed_chapters = list((_STATUS or {}).get("failed_chapters", []))
+                    failed_chapters.append(event.get("chapter_number"))
+                    updates["failed"] = int((_STATUS or {}).get("failed", 0)) + 1
+                    updates["failed_chapters"] = failed_chapters
                 _update_status(base_dir, **updates)
 
             saved_paths = summarize_chapter_range(

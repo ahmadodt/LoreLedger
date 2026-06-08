@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .io import read_json, write_json
 from .memory import update_character_memory
-from .paths import chapter_path, ensure_novel_dirs, summary_path
+from .paths import chapter_path, ensure_novel_dirs, extraction_failure_path, summary_path
 from .scraper import iter_chapter_files
 
 
@@ -18,6 +19,14 @@ class Summarizer(Protocol):
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+MAX_EXTRACTION_ATTEMPTS = 3
+
+
+class ExtractionAttemptsError(ValueError):
+    def __init__(self, attempts: list[dict[str, Any]]) -> None:
+        self.attempts = attempts
+        last_error = attempts[-1]["error"] if attempts else "Unknown extraction error."
+        super().__init__(f"Chapter extraction failed after {len(attempts)} attempts: {last_error}")
 
 
 @dataclass
@@ -46,15 +55,32 @@ class LlamaCppSummarizer:
         )
 
     def summarize_chapter(self, chapter: dict[str, Any], previous_summary: str | None) -> dict[str, Any]:
-        prompt = build_prompt(chapter, previous_summary)
-        result = self._llm(
-            prompt,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            stop=["</json>"],
-        )
-        text = result["choices"][0]["text"]
-        return normalize_summary(parse_json_response(text), chapter)
+        attempts = []
+        correction = None
+
+        for attempt_number in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
+            prompt = build_prompt(chapter, previous_summary, correction=correction)
+            result = self._llm(
+                prompt,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                stop=["</json>"],
+            )
+            text = result["choices"][0]["text"]
+            try:
+                return normalize_summary(parse_json_response(text), chapter)
+            except ValueError as exc:
+                attempts.append(
+                    {
+                        "attempt": attempt_number,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "model_output": text,
+                    }
+                )
+                correction = str(exc)
+
+        raise ExtractionAttemptsError(attempts)
 
     def close(self) -> None:
         llm = getattr(self, "_llm", None)
@@ -86,8 +112,17 @@ class FakeSummarizer:
         )
 
 
-def build_prompt(chapter: dict[str, Any], previous_summary: str | None) -> str:
+def build_prompt(
+    chapter: dict[str, Any], previous_summary: str | None, correction: str | None = None
+) -> str:
     previous = previous_summary or "No previous chapter summary is available."
+    correction_text = ""
+    if correction:
+        correction_text = f"""
+Correction required after the previous invalid response:
+{correction}
+Return the complete JSON again and correct this error. Do not omit any required fields.
+"""
     return f"""You summarize fiction chapters for LoreLedger, a personal story memory and retrieval tool.
 
 Use only the provided chapter text for new facts. Use the previous cumulative summary only for continuity and context.
@@ -111,6 +146,7 @@ Guidelines:
 - character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
 - Keep names, aliases, titles, groups, places, and artifacts as written in the chapter when possible.
 - If a field has no supported content, use an empty string or empty array as appropriate.
+{correction_text}
 
 Previous cumulative summary:
 {previous}
@@ -208,6 +244,24 @@ def previous_cumulative_summary(base_dir: Path, before_chapter: int) -> str | No
     return cumulative_summary
 
 
+def write_extraction_failure(
+    base_dir: Path, chapter: dict[str, Any], error: ExtractionAttemptsError
+) -> Path:
+    path = extraction_failure_path(base_dir, int(chapter["number"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        path,
+        {
+            "chapter_number": int(chapter["number"]),
+            "chapter_title": chapter["title"],
+            "chapter_url": chapter["url"],
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "attempts": error.attempts,
+        },
+    )
+    return path
+
+
 def summarize_chapter(
     base_dir: Path,
     chapter_number: int,
@@ -229,7 +283,18 @@ def summarize_chapter(
     chapter = read_json(in_path)
     previous_summary = previous_cumulative_summary(base_dir, chapter_number)
     _emit_progress(progress, "generating summary", chapter_number=chapter_number)
-    summary = normalize_summary(summarizer.summarize_chapter(chapter, previous_summary), chapter)
+    try:
+        summary = normalize_summary(summarizer.summarize_chapter(chapter, previous_summary), chapter)
+    except ExtractionAttemptsError as exc:
+        failure_path = write_extraction_failure(base_dir, chapter, exc)
+        _emit_progress(
+            progress,
+            "failed",
+            chapter_number=chapter_number,
+            error=str(exc),
+            path=str(failure_path),
+        )
+        raise
     _emit_progress(progress, "saving summary", chapter_number=chapter_number)
     write_json(out_path, summary)
     _emit_progress(progress, "updating character memory", chapter_number=chapter_number)
@@ -298,7 +363,20 @@ def summarize_chapter_range(
                 completed=index - 1,
                 total=len(selected_chapters),
             )
-            summary = normalize_summary(summarizer.summarize_chapter(chapter, cumulative_summary), chapter)
+            try:
+                summary = normalize_summary(summarizer.summarize_chapter(chapter, cumulative_summary), chapter)
+            except ExtractionAttemptsError as exc:
+                failure_path = write_extraction_failure(base_dir, chapter, exc)
+                _emit_progress(
+                    progress,
+                    "failed",
+                    chapter_number=chapter_number,
+                    completed=index,
+                    total=len(selected_chapters),
+                    error=str(exc),
+                    path=str(failure_path),
+                )
+                continue
             _emit_progress(
                 progress,
                 "saving summary",

@@ -11,6 +11,7 @@ from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
 from novel_memory.summarization_jobs import get_summarization_status, start_summarization_job
 from novel_memory.summarizer import (
+    ExtractionAttemptsError,
     FakeSummarizer,
     LlamaCppSummarizer,
     build_prompt,
@@ -122,6 +123,63 @@ def test_llama_cpp_summarizer_loads_hugging_face_gguf(monkeypatch):
     }
 
 
+def test_llama_cpp_summarizer_retries_with_validation_correction(monkeypatch):
+    prompts = []
+    responses = [
+        """{
+          "chapter_summary": "Simon dies.",
+          "important_events": ["Simon dies from rat bites."],
+          "characters": []
+        }""",
+        """{
+          "chapter_summary": "Simon dies.",
+          "important_events": ["Simon dies from rat bites."],
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites."}]
+        }""",
+    ]
+
+    class FakeLlama:
+        @classmethod
+        def from_pretrained(cls, **_kwargs):
+            return cls()
+
+        def __call__(self, prompt, **_kwargs):
+            prompts.append(prompt)
+            return {"choices": [{"text": responses.pop(0)}]}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    summarizer = LlamaCppSummarizer(model_repo="example/model-GGUF", model_file="model.gguf")
+
+    summary = summarizer.summarize_chapter(_chapter(3, "Simon dies from rat bites."), None)
+
+    assert summary["characters"][0]["name"] == "Simon"
+    assert len(prompts) == 2
+    assert "Correction required after the previous invalid response" in prompts[1]
+    assert "no character updates" in prompts[1]
+
+
+def test_llama_cpp_summarizer_does_not_retry_inference_errors(monkeypatch):
+    calls = 0
+
+    class FakeLlama:
+        @classmethod
+        def from_pretrained(cls, **_kwargs):
+            return cls()
+
+        def __call__(self, _prompt, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("GPU failure")
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    summarizer = LlamaCppSummarizer(model_repo="example/model-GGUF", model_file="model.gguf")
+
+    with pytest.raises(RuntimeError, match="GPU failure"):
+        summarizer.summarize_chapter(_chapter(1, "Arn enters."), None)
+
+    assert calls == 1
+
+
 def test_parse_json_response_allows_trailing_model_text():
     parsed = parse_json_response(
         """
@@ -226,6 +284,67 @@ def test_summarize_chapter_range_regenerates_when_forced(tmp_path: Path):
     assert (tmp_path / "characters" / "arn.json").exists()
 
 
+def test_single_chapter_failure_logs_all_model_outputs(tmp_path: Path, monkeypatch):
+    ensure_novel_dirs(tmp_path)
+    write_json(tmp_path / "chapters" / "chapter_0001.json", _chapter(1, "Arn enters."))
+    outputs = ["not json", "still not json", "final invalid output"]
+
+    class FakeLlama:
+        @classmethod
+        def from_pretrained(cls, **_kwargs):
+            return cls()
+
+        def __call__(self, _prompt, **_kwargs):
+            return {"choices": [{"text": outputs.pop(0)}]}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    summarizer = LlamaCppSummarizer(model_repo="example/model-GGUF", model_file="model.gguf")
+
+    with pytest.raises(ExtractionAttemptsError, match="3 attempts"):
+        summarize_chapter(tmp_path, 1, summarizer)
+
+    failure = read_json(tmp_path / "diagnostics" / "extraction_failures" / "chapter_0001.json")
+    assert [attempt["model_output"] for attempt in failure["attempts"]] == [
+        "not json",
+        "still not json",
+        "final invalid output",
+    ]
+    assert not (tmp_path / "summaries" / "chapter_0001.json").exists()
+    assert not (tmp_path / "characters" / "arn.json").exists()
+
+
+def test_chapter_range_logs_failure_and_continues(tmp_path: Path):
+    _write_chapters(tmp_path, count=2)
+    events = []
+
+    class PartiallyFailingSummarizer:
+        def summarize_chapter(self, chapter, previous_summary):
+            if chapter["number"] == 1:
+                raise ExtractionAttemptsError(
+                    [
+                        {
+                            "attempt": number,
+                            "error_type": "ValueError",
+                            "error": "invalid JSON",
+                            "model_output": f"bad output {number}",
+                        }
+                        for number in range(1, 4)
+                    ]
+                )
+            return {
+                "chapter_summary": "Arn completes chapter 2.",
+                "important_events": ["Arn completes chapter 2."],
+                "characters": [{"name": "Arn", "aliases": [], "update": "Completes chapter 2."}],
+            }
+
+    saved = summarize_chapter_range(tmp_path, PartiallyFailingSummarizer(), progress=events.append)
+
+    assert saved == [tmp_path / "summaries" / "chapter_0002.json"]
+    assert (tmp_path / "diagnostics" / "extraction_failures" / "chapter_0001.json").exists()
+    assert any(event["step"] == "failed" and event["chapter_number"] == 1 for event in events)
+    assert any(event["step"] == "saved" and event["chapter_number"] == 2 for event in events)
+
+
 def test_llama_cpp_summarizer_close_releases_model(monkeypatch):
     calls = {"closed": False}
 
@@ -316,15 +435,68 @@ def test_background_summarization_job_closes_model(tmp_path: Path, monkeypatch):
     assert instances and instances[0].closed is True
 
 
+def test_background_job_tracks_failed_chapters_and_finishes(tmp_path: Path, monkeypatch):
+    _write_chapters(tmp_path, count=2)
+
+    class PartiallyFailingSummarizer:
+        def __init__(self, **_kwargs):
+            pass
+
+        def summarize_chapter(self, chapter, previous_summary):
+            if chapter["number"] == 1:
+                raise ExtractionAttemptsError(
+                    [{"attempt": 1, "error_type": "ValueError", "error": "bad", "model_output": "bad"}]
+                )
+            return {
+                "chapter_summary": "Summary 2",
+                "important_events": [],
+                "characters": [],
+            }
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("novel_memory.summarization_jobs.LlamaCppSummarizer", PartiallyFailingSummarizer)
+
+    status = start_summarization_job(
+        tmp_path,
+        novel_slug="example",
+        model_config={
+            "model_repo": "example/model-GGUF",
+            "model_file": "model.gguf",
+            "context_size": 2048,
+            "gpu_layers": 0,
+            "temperature": 0.2,
+        },
+        start_chapter=1,
+        end_chapter=2,
+    )
+
+    for _ in range(50):
+        status = get_summarization_status(tmp_path) or status
+        if status["status"] != "running":
+            break
+        time.sleep(0.02)
+
+    assert status["status"] == "finished"
+    assert status["failed"] == 1
+    assert status["failed_chapters"] == [1]
+    assert status["completed"] == 2
+
+
 def _write_chapters(base_dir: Path, count: int) -> None:
     ensure_novel_dirs(base_dir)
     for number in range(1, count + 1):
         write_json(
             base_dir / "chapters" / f"chapter_{number:04d}.json",
-            {
-                "number": number,
-                "title": f"Chapter {number}",
-                "url": f"https://example.test/{number}",
-                "text": f"Arn does thing {number}. Then the chapter ends.",
-            },
+            _chapter(number, f"Arn does thing {number}. Then the chapter ends."),
         )
+
+
+def _chapter(number: int, text: str) -> dict:
+    return {
+        "number": number,
+        "title": f"Chapter {number}",
+        "url": f"https://example.test/{number}",
+        "text": text,
+    }

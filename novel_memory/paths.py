@@ -28,6 +28,10 @@ def summary_path(base_dir: Path, chapter_number: int) -> Path:
     return base_dir / "summaries" / f"chapter_{chapter_number:04d}.json"
 
 
+def extraction_failure_path(base_dir: Path, chapter_number: int) -> Path:
+    return base_dir / "diagnostics" / "extraction_failures" / f"chapter_{chapter_number:04d}.json"
+
+
 def character_path(base_dir: Path, character_name: str) -> Path:
     return base_dir / "characters" / f"{slugify(character_name)}.json"
 
