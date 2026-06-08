@@ -20,6 +20,7 @@ class Summarizer(Protocol):
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 MAX_EXTRACTION_ATTEMPTS = 3
+PREVIOUS_SUMMARY_LIMIT = 5
 
 
 class ExtractionAttemptsError(ValueError):
@@ -226,7 +227,12 @@ def _mentions_named_character(event: Any) -> bool:
 
 
 def previous_cumulative_summary(base_dir: Path, before_chapter: int) -> str | None:
-    cumulative_summary: str | None = None
+    lines = _previous_summary_lines(base_dir, before_chapter)
+    return _format_previous_summaries(lines)
+
+
+def _previous_summary_lines(base_dir: Path, before_chapter: int) -> list[str]:
+    lines = []
 
     for path in sorted((base_dir / "summaries").glob("chapter_*.json")):
         summary = read_json(path)
@@ -239,9 +245,13 @@ def previous_cumulative_summary(base_dir: Path, before_chapter: int) -> str | No
             continue
 
         line = f"Chapter {chapter_number}: {chapter_summary}"
-        cumulative_summary = f"{cumulative_summary}\n{line}" if cumulative_summary else line
+        lines.append(line)
 
-    return cumulative_summary
+    return lines[-PREVIOUS_SUMMARY_LIMIT:]
+
+
+def _format_previous_summaries(lines: list[str]) -> str | None:
+    return "\n".join(lines) if lines else None
 
 
 def write_extraction_failure(
@@ -332,7 +342,7 @@ def summarize_chapter_range(
         return saved_paths
 
     first_chapter = int(selected_chapters[0][1]["number"])
-    cumulative_summary = previous_cumulative_summary(base_dir, first_chapter)
+    previous_summary_lines = _previous_summary_lines(base_dir, first_chapter)
 
     for index, (_chapter_file, chapter) in enumerate(selected_chapters, start=1):
         chapter_number = int(chapter["number"])
@@ -364,7 +374,10 @@ def summarize_chapter_range(
                 total=len(selected_chapters),
             )
             try:
-                summary = normalize_summary(summarizer.summarize_chapter(chapter, cumulative_summary), chapter)
+                summary = normalize_summary(
+                    summarizer.summarize_chapter(chapter, _format_previous_summaries(previous_summary_lines)),
+                    chapter,
+                )
             except ExtractionAttemptsError as exc:
                 failure_path = write_extraction_failure(base_dir, chapter, exc)
                 _emit_progress(
@@ -405,11 +418,8 @@ def summarize_chapter_range(
 
         chapter_summary = summary.get("chapter_summary", "")
         if chapter_summary:
-            cumulative_summary = (
-                f"{cumulative_summary}\nChapter {summary['chapter_number']}: {chapter_summary}"
-                if cumulative_summary
-                else f"Chapter {summary['chapter_number']}: {chapter_summary}"
-            )
+            previous_summary_lines.append(f"Chapter {summary['chapter_number']}: {chapter_summary}")
+            previous_summary_lines = previous_summary_lines[-PREVIOUS_SUMMARY_LIMIT:]
 
     return saved_paths
 

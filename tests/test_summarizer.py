@@ -14,9 +14,11 @@ from novel_memory.summarizer import (
     ExtractionAttemptsError,
     FakeSummarizer,
     LlamaCppSummarizer,
+    PREVIOUS_SUMMARY_LIMIT,
     build_prompt,
     normalize_summary,
     parse_json_response,
+    previous_cumulative_summary,
     summarize_chapter,
     summarize_chapter_range,
     summarize_novel,
@@ -94,6 +96,86 @@ def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
     assert saved == tmp_path / "summaries" / "chapter_0002.json"
     assert calls["previous_summary"] == "Chapter 1: Arn enters the city."
     assert (tmp_path / "characters" / "arn.json").exists()
+
+
+def test_previous_cumulative_summary_uses_only_five_latest_summaries(tmp_path: Path):
+    ensure_novel_dirs(tmp_path)
+    for number in range(1, 8):
+        write_json(
+            tmp_path / "summaries" / f"chapter_{number:04d}.json",
+            {
+                "chapter_number": number,
+                "chapter_title": f"Chapter {number}",
+                "chapter_url": f"https://example.test/{number}",
+                "chapter_summary": f"Summary {number}",
+                "important_events": [],
+                "characters": [],
+            },
+        )
+
+    context = previous_cumulative_summary(tmp_path, before_chapter=8)
+
+    assert context is not None
+    assert context.splitlines() == [
+        "Chapter 3: Summary 3",
+        "Chapter 4: Summary 4",
+        "Chapter 5: Summary 5",
+        "Chapter 6: Summary 6",
+        "Chapter 7: Summary 7",
+    ]
+
+
+def test_previous_cumulative_summary_keeps_all_when_fewer_than_limit(tmp_path: Path):
+    ensure_novel_dirs(tmp_path)
+    for number in range(1, PREVIOUS_SUMMARY_LIMIT):
+        write_json(
+            tmp_path / "summaries" / f"chapter_{number:04d}.json",
+            {
+                "chapter_number": number,
+                "chapter_title": f"Chapter {number}",
+                "chapter_url": f"https://example.test/{number}",
+                "chapter_summary": f"Summary {number}",
+                "important_events": [],
+                "characters": [],
+            },
+        )
+
+    context = previous_cumulative_summary(tmp_path, before_chapter=PREVIOUS_SUMMARY_LIMIT)
+
+    assert context is not None
+    assert len(context.splitlines()) == PREVIOUS_SUMMARY_LIMIT - 1
+
+
+def test_chapter_range_maintains_rolling_five_summary_context(tmp_path: Path):
+    _write_chapters(tmp_path, count=7)
+    contexts = []
+
+    class CapturingSummarizer:
+        def summarize_chapter(self, chapter, previous_summary):
+            contexts.append(previous_summary)
+            return {
+                "chapter_summary": f"Summary {chapter['number']}",
+                "important_events": [],
+                "characters": [],
+            }
+
+    summarize_chapter_range(tmp_path, CapturingSummarizer())
+
+    assert contexts[0] is None
+    assert contexts[5].splitlines() == [
+        "Chapter 1: Summary 1",
+        "Chapter 2: Summary 2",
+        "Chapter 3: Summary 3",
+        "Chapter 4: Summary 4",
+        "Chapter 5: Summary 5",
+    ]
+    assert contexts[6].splitlines() == [
+        "Chapter 2: Summary 2",
+        "Chapter 3: Summary 3",
+        "Chapter 4: Summary 4",
+        "Chapter 5: Summary 5",
+        "Chapter 6: Summary 6",
+    ]
 
 
 def test_llama_cpp_summarizer_loads_hugging_face_gguf(monkeypatch):
