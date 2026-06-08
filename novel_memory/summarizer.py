@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -105,8 +106,9 @@ Use this exact JSON shape:
 Guidelines:
 - chapter_summary should preserve plot progression, consequences, reveals, decisions, conflicts, and unresolved hooks.
 - important_events should contain 3-8 concrete events or state changes that matter after this chapter.
-- characters should include only characters with meaningful new information in this chapter.
-- character updates should capture status changes, goals, relationships, secrets, injuries, abilities, faction changes, or revelations.
+- characters should include every named character whose state meaningfully changes in this chapter.
+- Every important event involving a named character must have a matching character update.
+- character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
 - Keep names, aliases, titles, groups, places, and artifacts as written in the chapter when possible.
 - If a field has no supported content, use an empty string or empty array as appropriate.
 
@@ -145,7 +147,7 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
         aliases = [str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]
         characters.append({"name": name, "aliases": aliases, "update": update})
 
-    return {
+    summary = {
         "chapter_number": int(chapter["number"]),
         "chapter_title": chapter["title"],
         "chapter_url": chapter["url"],
@@ -153,6 +155,38 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
         "important_events": [str(event).strip() for event in data.get("important_events", []) if str(event).strip()],
         "characters": characters,
     }
+    validate_summary(summary)
+    return summary
+
+
+def validate_summary(summary: dict[str, Any]) -> None:
+    important_events = summary.get("important_events", [])
+    if summary.get("characters") or not important_events:
+        return
+
+    named_events = [event for event in important_events if _mentions_named_character(event)]
+    if not named_events:
+        return
+
+    raise ValueError(
+        "Summary has important events involving named characters but no character updates: "
+        + "; ".join(named_events)
+    )
+
+
+def _mentions_named_character(event: Any) -> bool:
+    words = re.findall(r"\b[A-Z][a-zA-Z']*\b", str(event))
+    ignored = {
+        "A",
+        "An",
+        "The",
+        "This",
+        "That",
+        "These",
+        "Those",
+        "Chapter",
+    }
+    return any(word not in ignored for word in words)
 
 
 def previous_cumulative_summary(base_dir: Path, before_chapter: int) -> str | None:

@@ -15,14 +15,16 @@ def update_character_memory(base_dir: Path, summary: dict[str, Any]) -> None:
 
     for character in summary.get("characters", []):
         name = character["name"]
-        path = character_path(base_dir, name)
+        path, canonical_name, existing_aliases = _resolve_character_identity(base_dir, index, character)
         if path.exists():
             data = read_json(path)
         else:
-            data = {"name": name, "aliases": [], "timeline": []}
+            data = {"name": canonical_name, "aliases": existing_aliases, "timeline": []}
 
         aliases = set(data.get("aliases", []))
         aliases.update(character.get("aliases", []))
+        if slugify(name) != slugify(data.get("name", name)):
+            aliases.add(name)
         timeline = [
             item for item in data.get("timeline", []) if item.get("chapter_number") != summary["chapter_number"]
         ]
@@ -38,13 +40,50 @@ def update_character_memory(base_dir: Path, summary: dict[str, Any]) -> None:
         data = {"name": data.get("name", name), "aliases": sorted(aliases), "timeline": timeline}
         write_json(path, data)
 
-        index[slugify(name)] = {
+        index[slugify(data["name"])] = {
             "name": data["name"],
             "aliases": data["aliases"],
             "path": str(path.relative_to(base_dir)),
         }
 
     write_json(index_path, index)
+
+
+def _resolve_character_identity(
+    base_dir: Path, index: dict[str, Any], character: dict[str, Any]
+) -> tuple[Path, str, list[str]]:
+    incoming_names = [character["name"], *character.get("aliases", [])]
+    incoming_slugs = {slugify(name) for name in incoming_names if str(name).strip()}
+
+    exact_matches = []
+    for item in index.values():
+        known_names = [item["name"], *item.get("aliases", [])]
+        known_slugs = {slugify(name) for name in known_names if str(name).strip()}
+        if incoming_slugs & known_slugs:
+            exact_matches.append(item)
+
+    if len(exact_matches) == 1:
+        item = exact_matches[0]
+        return base_dir / item["path"], item["name"], list(item.get("aliases", []))
+    if len(exact_matches) > 1:
+        return character_path(base_dir, character["name"]), character["name"], []
+
+    token_matches = []
+    incoming_tokens = _name_tokens(character["name"])
+    for item in index.values():
+        known_names = [item["name"], *item.get("aliases", [])]
+        if any(_name_tokens(name) and _name_tokens(name).issubset(incoming_tokens) for name in known_names):
+            token_matches.append(item)
+
+    if len(token_matches) == 1:
+        item = token_matches[0]
+        return base_dir / item["path"], item["name"], list(item.get("aliases", []))
+
+    return character_path(base_dir, character["name"]), character["name"], []
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {part for part in slugify(name).split("_") if part}
 
 
 def find_character(base_dir: Path, name: str) -> dict[str, Any] | None:

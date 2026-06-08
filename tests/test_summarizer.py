@@ -14,6 +14,7 @@ from novel_memory.summarizer import (
     FakeSummarizer,
     LlamaCppSummarizer,
     build_prompt,
+    normalize_summary,
     parse_json_response,
     summarize_chapter,
     summarize_chapter_range,
@@ -152,9 +153,27 @@ def test_build_prompt_guides_strict_story_memory_summary():
     assert "previous cumulative summary only for continuity" in prompt
     assert "4-8 concise sentences" in prompt
     assert "3-8 concrete events or state changes" in prompt
-    assert "status changes, goals, relationships, secrets, injuries, abilities, faction changes, or revelations" in prompt
+    assert "Every important event involving a named character must have a matching character update" in prompt
+    assert "deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations" in prompt
     assert "Chapter 7: The Gate" in prompt
     assert "Chapter 6: Mira finds the gate key." in prompt
+
+
+def test_normalize_summary_rejects_named_events_without_character_updates():
+    with pytest.raises(ValueError, match="important events involving named characters"):
+        normalize_summary(
+            {
+                "chapter_summary": "Simon finds the dungeon and dies.",
+                "important_events": ["Simon dies from rat bites."],
+                "characters": [],
+            },
+            {
+                "number": 3,
+                "title": "Level One",
+                "url": "https://example.test/3",
+                "text": "Simon dies from rat bites.",
+            },
+        )
 
 
 def test_summarize_chapter_range_skips_existing_by_default(tmp_path: Path):
