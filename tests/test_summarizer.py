@@ -87,6 +87,7 @@ def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
                         "name": "Arn",
                         "aliases": [],
                         "update": "Meets Mira in chapter 2.",
+                        "evidence": "Arn meets Mira.",
                     }
                 ],
             }
@@ -211,12 +212,12 @@ def test_llama_cpp_summarizer_retries_with_validation_correction(monkeypatch):
         """{
           "chapter_summary": "Simon dies.",
           "important_events": ["Simon dies from rat bites."],
-          "characters": []
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon defeats the rats."}]
         }""",
         """{
           "chapter_summary": "Simon dies.",
           "important_events": ["Simon dies from rat bites."],
-          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites."}]
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
         }""",
     ]
 
@@ -237,7 +238,7 @@ def test_llama_cpp_summarizer_retries_with_validation_correction(monkeypatch):
     assert summary["characters"][0]["name"] == "Simon"
     assert len(prompts) == 2
     assert "Correction required after the previous invalid response" in prompts[1]
-    assert "no character updates" in prompts[1]
+    assert "was not found in the current chapter text" in prompts[1]
 
 
 def test_llama_cpp_summarizer_does_not_retry_inference_errors(monkeypatch):
@@ -295,6 +296,8 @@ def test_build_prompt_guides_strict_story_memory_summary():
     assert "3-8 concrete events or state changes" in prompt
     assert "Every important event involving a named character must have a matching character update" in prompt
     assert "deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations" in prompt
+    assert "evidence excerpt copied exactly from the current chapter text" in prompt
+    assert "finds someone already dead" in prompt
     assert "Chapter 7: The Gate" in prompt
     assert "Chapter 6: Mira finds the gate key." in prompt
 
@@ -314,6 +317,93 @@ def test_normalize_summary_rejects_named_events_without_character_updates():
                 "text": "Simon dies from rat bites.",
             },
         )
+
+
+def test_normalize_summary_accepts_whitespace_normalized_evidence():
+    summary = normalize_summary(
+        {
+            "chapter_summary": "Arn meets Mira.",
+            "important_events": ["Arn meets Mira."],
+            "characters": [
+                {
+                    "name": "Arn",
+                    "aliases": [],
+                    "update": "Meets Mira.",
+                    "evidence": "Arn   meets\nMira.",
+                }
+            ],
+        },
+        _chapter(1, "Arn meets Mira."),
+    )
+
+    assert summary["characters"][0]["evidence"] == "Arn   meets\nMira."
+
+
+def test_normalize_summary_accepts_evidence_with_typographic_punctuation_changes():
+    summary = normalize_summary(
+        {
+            "chapter_summary": "Arn answers Mira.",
+            "important_events": ["Arn answers Mira."],
+            "characters": [
+                {
+                    "name": "Arn",
+                    "aliases": [],
+                    "update": "Answers Mira.",
+                    "evidence": "Arn said, \"I won't leave.\"",
+                }
+            ],
+        },
+        _chapter(1, "Arn said, \u201cI won\u2019t leave.\u201d"),
+    )
+
+    assert summary["characters"][0]["update"] == "Answers Mira."
+
+
+@pytest.mark.parametrize(
+    ("evidence", "message"),
+    [
+        ("", "missing source evidence"),
+        ("Arn defeats Mira.", "was not found"),
+        (" ".join(["word"] * 51), "exceeds 50 words"),
+    ],
+)
+def test_normalize_summary_rejects_invalid_character_evidence(evidence, message):
+    with pytest.raises(ValueError, match=message):
+        normalize_summary(
+            {
+                "chapter_summary": "Arn finds Mira.",
+                "important_events": ["Arn finds Mira."],
+                "characters": [
+                    {
+                        "name": "Arn",
+                        "aliases": [],
+                        "update": "Finds Mira.",
+                        "evidence": evidence,
+                    }
+                ],
+            },
+            _chapter(1, "Arn finds Mira already dead beside the road."),
+        )
+
+
+def test_found_dead_update_preserves_source_attribution():
+    summary = normalize_summary(
+        {
+            "chapter_summary": "Simon finds the tavern maid dead.",
+            "important_events": ["Simon finds the tavern maid already dead."],
+            "characters": [
+                {
+                    "name": "Blonde Tavern Maid",
+                    "aliases": [],
+                    "update": "Simon finds her already dead.",
+                    "evidence": "That was when he noticed the body on the floor.",
+                }
+            ],
+        },
+        _chapter(18, "That was when he noticed the body on the floor."),
+    )
+
+    assert summary["characters"][0]["update"] == "Simon finds her already dead."
 
 
 def test_summarize_chapter_range_skips_existing_by_default(tmp_path: Path):
@@ -416,7 +506,14 @@ def test_chapter_range_logs_failure_and_continues(tmp_path: Path):
             return {
                 "chapter_summary": "Arn completes chapter 2.",
                 "important_events": ["Arn completes chapter 2."],
-                "characters": [{"name": "Arn", "aliases": [], "update": "Completes chapter 2."}],
+                "characters": [
+                    {
+                        "name": "Arn",
+                        "aliases": [],
+                        "update": "Completes chapter 2.",
+                        "evidence": "Arn does thing 2.",
+                    }
+                ],
             }
 
     saved = summarize_chapter_range(tmp_path, PartiallyFailingSummarizer(), progress=events.append)
@@ -425,6 +522,10 @@ def test_chapter_range_logs_failure_and_continues(tmp_path: Path):
     assert (tmp_path / "diagnostics" / "extraction_failures" / "chapter_0001.json").exists()
     assert any(event["step"] == "failed" and event["chapter_number"] == 1 for event in events)
     assert any(event["step"] == "saved" and event["chapter_number"] == 2 for event in events)
+    summary = read_json(tmp_path / "summaries" / "chapter_0002.json")
+    character = read_json(tmp_path / "characters" / "arn.json")
+    assert summary["characters"][0]["evidence"] == "Arn does thing 2."
+    assert "evidence" not in character["timeline"][0]
 
 
 def test_llama_cpp_summarizer_close_releases_model(monkeypatch):

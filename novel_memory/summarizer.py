@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,8 @@ class Summarizer(Protocol):
 ProgressCallback = Callable[[dict[str, Any]], None]
 MAX_EXTRACTION_ATTEMPTS = 3
 PREVIOUS_SUMMARY_LIMIT = 5
+TARGET_EVIDENCE_WORDS = 25
+MAX_EVIDENCE_WORDS = 50
 
 
 class ExtractionAttemptsError(ValueError):
@@ -37,7 +40,7 @@ class LlamaCppSummarizer:
     context_size: int = 4096
     gpu_layers: int = 20
     temperature: float = 0.2
-    max_tokens: int = 900
+    max_tokens: int = 1200
 
     def __post_init__(self) -> None:
         try:
@@ -106,6 +109,7 @@ class FakeSummarizer:
                         "name": "Arn",
                         "aliases": [],
                         "update": f"Appears in chapter {chapter['number']} with {len(words)} words of source text.",
+                        "evidence": first_sentence[:200],
                     }
                 ],
             },
@@ -135,7 +139,7 @@ Use this exact JSON shape:
   "chapter_summary": "4-8 concise sentences summarizing this chapter",
   "important_events": ["concrete event or state change 1", "concrete event or state change 2"],
   "characters": [
-    {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter"}}
+    {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter", "evidence": "short exact excerpt from the chapter"}}
   ]
 }}
 
@@ -145,6 +149,11 @@ Guidelines:
 - characters should include every named character whose state meaningfully changes in this chapter.
 - Every important event involving a named character must have a matching character update.
 - character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
+- Every character update must include one short evidence excerpt copied exactly from the current chapter text.
+- Evidence should be the shortest useful clause or sentence, preferably at most 25 words and never more than 50. Do not use previous summaries as evidence.
+- Do not infer causation. Finding, witnessing, discussing, or learning about an event does not mean the character caused it.
+- In particular, if a character finds someone already dead, say they found the person dead; do not claim they killed them.
+- Keep the character list concise. Do not create entries for generic enemies, crowds, or unnamed incidental people unless their change matters beyond this chapter.
 - Keep names, aliases, titles, groups, places, and artifacts as written in the chapter when possible.
 - If a field has no supported content, use an empty string or empty array as appropriate.
 {correction_text}
@@ -181,8 +190,10 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
         update = str(item.get("update", "")).strip()
         if not name or not update:
             continue
+        evidence = str(item.get("evidence", "")).strip()
+        _validate_evidence(name, evidence, str(chapter.get("text", "")))
         aliases = [str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]
-        characters.append({"name": name, "aliases": aliases, "update": update})
+        characters.append({"name": name, "aliases": aliases, "update": update, "evidence": evidence})
 
     summary = {
         "chapter_number": int(chapter["number"]),
@@ -194,6 +205,29 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
     }
     validate_summary(summary)
     return summary
+
+
+def _validate_evidence(character_name: str, evidence: str, chapter_text: str) -> None:
+    if not evidence:
+        raise ValueError(f"Character update for {character_name!r} is missing source evidence.")
+
+    if len(evidence.split()) > MAX_EVIDENCE_WORDS:
+        raise ValueError(
+            f"Character update evidence for {character_name!r} exceeds {MAX_EVIDENCE_WORDS} words."
+        )
+
+    normalized_evidence = _normalize_evidence_text(evidence)
+    normalized_chapter = _normalize_evidence_text(chapter_text)
+    if normalized_evidence not in normalized_chapter:
+        raise ValueError(
+            f"Character update evidence for {character_name!r} was not found in the current chapter text."
+        )
+
+
+def _normalize_evidence_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    return " ".join(normalized.split())
 
 
 def validate_summary(summary: dict[str, Any]) -> None:
