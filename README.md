@@ -107,6 +107,9 @@ Scrape a novel:
 python -m novel_memory scrape --title "Practical Guide To Evil" --start-url "https://www.royalroad.com/fiction/..." --max-chapters 100
 ```
 
+Verified RoyalRoad titles and first-chapter URLs are available in
+`examples/royalroad_stories.json` for quick scraper testing.
+
 Summarize chapters and update character memory:
 
 ```powershell
