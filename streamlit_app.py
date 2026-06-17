@@ -117,7 +117,16 @@ def format_elapsed(seconds: int) -> str:
 def render_summary(summary: dict[str, Any]) -> None:
     st.success("Summary exists.")
     st.write(summary.get("chapter_summary", ""))
-    if summary.get("important_events"):
+    if summary.get("events"):
+        st.write("Important events")
+        for event in summary["events"]:
+            participants = ", ".join(event.get("participants", []))
+            event_type = event.get("event_type", "other")
+            label = f"{event.get('description', '')} [{event_type}]"
+            if participants:
+                label = f"{label} - {participants}"
+            st.write(f"- {label}")
+    elif summary.get("important_events"):
         st.write("Important events")
         for event in summary["important_events"]:
             st.write(f"- {event}")

@@ -211,12 +211,12 @@ def test_llama_cpp_summarizer_retries_with_validation_correction(monkeypatch):
     responses = [
         """{
           "chapter_summary": "Simon dies.",
-          "important_events": ["Simon dies from rat bites."],
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
           "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon defeats the rats."}]
         }""",
         """{
           "chapter_summary": "Simon dies.",
-          "important_events": ["Simon dies from rat bites."],
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
           "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
         }""",
     ]
@@ -293,13 +293,142 @@ def test_build_prompt_guides_strict_story_memory_summary():
     assert "Use only the provided chapter text for new facts" in prompt
     assert "previous cumulative summary only for continuity" in prompt
     assert "4-8 concise sentences" in prompt
-    assert "3-8 concrete events or state changes" in prompt
-    assert "Every important event involving a named character must have a matching character update" in prompt
+    assert "3-6 atomic, evidence-backed events" in prompt
+    assert "Every event must use exactly one event_type" in prompt
+    assert "Every event must include participants" in prompt
+    assert "Every event involving a named character whose state changes must have a matching character update" in prompt
     assert "deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations" in prompt
     assert "evidence excerpt copied exactly from the current chapter text" in prompt
     assert "finds someone already dead" in prompt
     assert "Chapter 7: The Gate" in prompt
     assert "Chapter 6: Mira finds the gate key." in prompt
+
+
+def test_normalize_summary_accepts_evidence_backed_events_and_derives_important_events():
+    summary = normalize_summary(
+        {
+            "chapter_summary": "Arn meets Mira.",
+            "events": [
+                {
+                    "description": "Arn meets Mira.",
+                    "event_type": "relationship",
+                    "participants": ["Arn", "Mira"],
+                    "evidence": "Arn meets Mira.",
+                }
+            ],
+            "characters": [
+                {
+                    "name": "Arn",
+                    "aliases": [],
+                    "update": "Meets Mira.",
+                    "evidence": "Arn meets Mira.",
+                }
+            ],
+        },
+        _chapter(1, "Arn meets Mira."),
+    )
+
+    assert summary["events"][0]["event_type"] == "relationship"
+    assert summary["events"][0]["participants"] == ["Arn", "Mira"]
+    assert summary["important_events"] == ["Arn meets Mira."]
+
+
+def test_normalize_summary_rejects_invalid_event_evidence():
+    with pytest.raises(ValueError, match="Event evidence for '1' was not found"):
+        normalize_summary(
+            {
+                "chapter_summary": "Arn meets Mira.",
+                "events": [
+                    {
+                        "description": "Arn meets Mira.",
+                        "event_type": "relationship",
+                        "participants": ["Arn", "Mira"],
+                        "evidence": "Arn defeats Mira.",
+                    }
+                ],
+                "characters": [],
+            },
+            _chapter(1, "Arn meets Mira."),
+        )
+
+
+def test_normalize_summary_rejects_named_event_without_participants():
+    with pytest.raises(ValueError, match="participants"):
+        normalize_summary(
+            {
+                "chapter_summary": "Arn meets Mira.",
+                "events": [
+                    {
+                        "description": "Arn meets Mira.",
+                        "event_type": "relationship",
+                        "participants": [],
+                        "evidence": "Arn meets Mira.",
+                    }
+                ],
+                "characters": [],
+            },
+            _chapter(1, "Arn meets Mira."),
+        )
+
+
+def test_normalize_summary_rejects_major_character_update_without_related_event():
+    with pytest.raises(ValueError, match="major state change"):
+        normalize_summary(
+            {
+                "chapter_summary": "Arn heals Mira.",
+                "events": [
+                    {
+                        "description": "Arn finds a locked door.",
+                        "event_type": "discovery",
+                        "participants": ["Arn"],
+                        "evidence": "Arn finds a locked door.",
+                    }
+                ],
+                "characters": [
+                    {
+                        "name": "Mira",
+                        "aliases": [],
+                        "update": "Heals after the duel.",
+                        "evidence": "Mira heals after the duel.",
+                    }
+                ],
+            },
+            _chapter(1, "Arn finds a locked door. Mira heals after the duel."),
+        )
+
+
+def test_llama_cpp_summarizer_retries_with_event_validation_correction(monkeypatch):
+    prompts = []
+    responses = [
+        """{
+          "chapter_summary": "Simon dies.",
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon defeats the rats."}],
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
+        }""",
+        """{
+          "chapter_summary": "Simon dies.",
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
+        }""",
+    ]
+
+    class FakeLlama:
+        @classmethod
+        def from_pretrained(cls, **_kwargs):
+            return cls()
+
+        def __call__(self, prompt, **_kwargs):
+            prompts.append(prompt)
+            return {"choices": [{"text": responses.pop(0)}]}
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+    summarizer = LlamaCppSummarizer(model_repo="example/model-GGUF", model_file="model.gguf")
+
+    summary = summarizer.summarize_chapter(_chapter(3, "Simon dies from rat bites."), None)
+
+    assert summary["events"][0]["description"] == "Simon dies from rat bites."
+    assert len(prompts) == 2
+    assert "Event evidence for '1' was not found in the current chapter text" in prompts[1]
 
 
 def test_normalize_summary_rejects_named_events_without_character_updates():

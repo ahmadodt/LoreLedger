@@ -15,6 +15,21 @@ def test_build_rag_index_uses_summaries_characters_and_chapters(tmp_path: Path):
     assert source_types == {"summary", "character", "chapter"}
 
 
+def test_build_rag_index_includes_structured_event_details(tmp_path: Path):
+    _write_fixture_novel(tmp_path)
+
+    path = build_rag_index(tmp_path)
+
+    index = read_json(path)
+    summary_documents = [document for document in index["documents"] if document["id"] == "summary:0002"]
+    assert summary_documents
+    text = summary_documents[0]["text"]
+    assert "Event: Mira warns Arn about the patron." in text
+    assert "Type: revelation" in text
+    assert "Participants: Mira, Arn" in text
+    assert "Evidence: Mira warns him about the patron." in text
+
+
 def test_retrieve_context_returns_relevant_character_context(tmp_path: Path):
     _write_fixture_novel(tmp_path)
     build_rag_index(tmp_path)
@@ -92,6 +107,14 @@ def _write_fixture_novel(base_dir: Path) -> None:
             "chapter_url": "https://example.test/2",
             "chapter_summary": "Mira heals Arn and warns him.",
             "important_events": ["Mira warns Arn about the patron."],
+            "events": [
+                {
+                    "description": "Mira warns Arn about the patron.",
+                    "event_type": "revelation",
+                    "participants": ["Mira", "Arn"],
+                    "evidence": "Mira warns him about the patron.",
+                }
+            ],
             "characters": [
                 {
                     "name": "Mira",

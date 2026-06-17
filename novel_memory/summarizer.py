@@ -24,6 +24,40 @@ MAX_EXTRACTION_ATTEMPTS = 3
 PREVIOUS_SUMMARY_LIMIT = 5
 TARGET_EVIDENCE_WORDS = 25
 MAX_EVIDENCE_WORDS = 50
+EVENT_TYPES = {
+    "action",
+    "discovery",
+    "decision",
+    "relationship",
+    "injury",
+    "death",
+    "ability",
+    "faction",
+    "revelation",
+    "location",
+    "other",
+}
+MAJOR_CHARACTER_UPDATE_TERMS = {
+    "dies",
+    "dead",
+    "death",
+    "injured",
+    "injury",
+    "wounded",
+    "discovers",
+    "learns",
+    "reveals",
+    "revelation",
+    "secret",
+    "ability",
+    "power",
+    "faction",
+    "relationship",
+    "goal",
+    "decides",
+    "kills",
+    "heals",
+}
 
 
 class ExtractionAttemptsError(ValueError):
@@ -40,7 +74,7 @@ class LlamaCppSummarizer:
     context_size: int = 4096
     gpu_layers: int = 20
     temperature: float = 0.2
-    max_tokens: int = 1200
+    max_tokens: int = 1600
 
     def __post_init__(self) -> None:
         try:
@@ -72,7 +106,10 @@ class LlamaCppSummarizer:
             )
             text = result["choices"][0]["text"]
             try:
-                return normalize_summary(parse_json_response(text), chapter)
+                data = parse_json_response(text)
+                if "events" not in data:
+                    raise ValueError("Field 'events' is required for model summaries.")
+                return normalize_summary(data, chapter)
             except ValueError as exc:
                 attempts.append(
                     {
@@ -100,10 +137,20 @@ class FakeSummarizer:
     def summarize_chapter(self, chapter: dict[str, Any], previous_summary: str | None) -> dict[str, Any]:
         words = chapter["text"].split()
         first_sentence = chapter["text"].split(".")[0].strip()
+        events = []
+        if first_sentence:
+            events.append(
+                {
+                    "description": first_sentence[:200],
+                    "event_type": "other",
+                    "participants": ["Arn"],
+                    "evidence": first_sentence[:200],
+                }
+            )
         return normalize_summary(
             {
                 "chapter_summary": first_sentence[:300],
-                "important_events": [first_sentence[:200]] if first_sentence else [],
+                "events": events,
                 "characters": [
                     {
                         "name": "Arn",
@@ -137,7 +184,9 @@ Return strict JSON only. Do not include markdown, comments, prose before the JSO
 Use this exact JSON shape:
 {{
   "chapter_summary": "4-8 concise sentences summarizing this chapter",
-  "important_events": ["concrete event or state change 1", "concrete event or state change 2"],
+  "events": [
+    {{"description": "one atomic concrete event or state change", "event_type": "action|discovery|decision|relationship|injury|death|ability|faction|revelation|location|other", "participants": ["Character or entity name"], "evidence": "short exact excerpt from the chapter"}}
+  ],
   "characters": [
     {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter", "evidence": "short exact excerpt from the chapter"}}
   ]
@@ -145,9 +194,12 @@ Use this exact JSON shape:
 
 Guidelines:
 - chapter_summary should preserve plot progression, consequences, reveals, decisions, conflicts, and unresolved hooks.
-- important_events should contain 3-8 concrete events or state changes that matter after this chapter.
+- events should contain 3-6 atomic, evidence-backed events or state changes that matter after this chapter.
+- Every event must use exactly one event_type from: action, discovery, decision, relationship, injury, death, ability, faction, revelation, location, other.
+- Every event must include participants for named characters, factions, groups, places, or artifacts directly involved in the event.
+- Every event must include one short evidence excerpt copied exactly from the current chapter text.
 - characters should include every named character whose state meaningfully changes in this chapter.
-- Every important event involving a named character must have a matching character update.
+- Every event involving a named character whose state changes must have a matching character update.
 - character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
 - Every character update must include one short evidence excerpt copied exactly from the current chapter text.
 - Evidence should be the shortest useful clause or sentence, preferably at most 25 words and never more than 50. Do not use previous summaries as evidence.
@@ -184,6 +236,8 @@ def parse_json_response(text: str) -> dict[str, Any]:
 
 
 def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str, Any]:
+    chapter_text = str(chapter.get("text", ""))
+    events = _normalize_events(data, chapter_text)
     characters = []
     for item in data.get("characters", []):
         name = str(item.get("name", "")).strip()
@@ -191,37 +245,79 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
         if not name or not update:
             continue
         evidence = str(item.get("evidence", "")).strip()
-        _validate_evidence(name, evidence, str(chapter.get("text", "")))
+        _validate_evidence("Character update", name, evidence, chapter_text)
         aliases = [str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]
         characters.append({"name": name, "aliases": aliases, "update": update, "evidence": evidence})
+
+    important_events = [event["description"] for event in events]
+    if not important_events:
+        important_events = [str(event).strip() for event in data.get("important_events", []) if str(event).strip()]
 
     summary = {
         "chapter_number": int(chapter["number"]),
         "chapter_title": chapter["title"],
         "chapter_url": chapter["url"],
         "chapter_summary": str(data.get("chapter_summary", "")).strip(),
-        "important_events": [str(event).strip() for event in data.get("important_events", []) if str(event).strip()],
+        "important_events": important_events,
+        "events": events,
         "characters": characters,
     }
     validate_summary(summary)
     return summary
 
 
-def _validate_evidence(character_name: str, evidence: str, chapter_text: str) -> None:
+def _normalize_events(data: dict[str, Any], chapter_text: str) -> list[dict[str, Any]]:
+    events = []
+    raw_events = data.get("events", [])
+    if not isinstance(raw_events, list):
+        raise ValueError("Field 'events' must be an array.")
+
+    for index, item in enumerate(raw_events, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Event {index} must be a JSON object.")
+
+        description = str(item.get("description", "")).strip()
+        if not description:
+            continue
+
+        event_type = str(item.get("event_type", "")).strip().lower()
+        if event_type not in EVENT_TYPES:
+            raise ValueError(
+                f"Event {index} field 'event_type' must be one of: {', '.join(sorted(EVENT_TYPES))}."
+            )
+
+        raw_participants = item.get("participants", [])
+        if not isinstance(raw_participants, list):
+            raise ValueError(f"Event {index} field 'participants' must be an array.")
+        participants = [str(participant).strip() for participant in raw_participants if str(participant).strip()]
+        if _mentions_named_character(description) and not participants:
+            raise ValueError(f"Event {index} field 'participants' is required for named-character events.")
+
+        evidence = str(item.get("evidence", "")).strip()
+        _validate_evidence("Event", str(index), evidence, chapter_text)
+        events.append(
+            {
+                "description": description,
+                "event_type": event_type,
+                "participants": participants,
+                "evidence": evidence,
+            }
+        )
+
+    return events
+
+
+def _validate_evidence(kind: str, label: str, evidence: str, chapter_text: str) -> None:
     if not evidence:
-        raise ValueError(f"Character update for {character_name!r} is missing source evidence.")
+        raise ValueError(f"{kind} evidence for {label!r} is missing source evidence.")
 
     if len(evidence.split()) > MAX_EVIDENCE_WORDS:
-        raise ValueError(
-            f"Character update evidence for {character_name!r} exceeds {MAX_EVIDENCE_WORDS} words."
-        )
+        raise ValueError(f"{kind} evidence for {label!r} exceeds {MAX_EVIDENCE_WORDS} words.")
 
     normalized_evidence = _normalize_evidence_text(evidence)
     normalized_chapter = _normalize_evidence_text(chapter_text)
     if normalized_evidence not in normalized_chapter:
-        raise ValueError(
-            f"Character update evidence for {character_name!r} was not found in the current chapter text."
-        )
+        raise ValueError(f"{kind} evidence for {label!r} was not found in the current chapter text.")
 
 
 def _normalize_evidence_text(value: str) -> str:
@@ -231,6 +327,7 @@ def _normalize_evidence_text(value: str) -> str:
 
 
 def validate_summary(summary: dict[str, Any]) -> None:
+    _validate_major_character_updates_have_events(summary)
     important_events = summary.get("important_events", [])
     if summary.get("characters") or not important_events:
         return
@@ -258,6 +355,54 @@ def _mentions_named_character(event: Any) -> bool:
         "Chapter",
     }
     return any(word not in ignored for word in words)
+
+
+def _validate_major_character_updates_have_events(summary: dict[str, Any]) -> None:
+    events = summary.get("events", [])
+    if not events:
+        return
+
+    for character in summary.get("characters", []):
+        update = str(character.get("update", ""))
+        if not _is_major_character_update(update):
+            continue
+        names = [character.get("name", ""), *character.get("aliases", [])]
+        if any(_event_matches_character_update(event, names, character.get("evidence", "")) for event in events):
+            continue
+        raise ValueError(
+            "Character update for "
+            f"{character.get('name', '')!r} describes a major state change without a related evidence-backed event."
+        )
+
+
+def _is_major_character_update(update: str) -> bool:
+    tokens = set(re.findall(r"[a-z]+", update.lower()))
+    return bool(tokens & MAJOR_CHARACTER_UPDATE_TERMS)
+
+
+def _event_matches_character_update(event: dict[str, Any], names: list[Any], character_evidence: Any) -> bool:
+    event_text = " ".join(
+        [
+            str(event.get("description", "")),
+            str(event.get("evidence", "")),
+            " ".join(str(participant) for participant in event.get("participants", [])),
+        ]
+    )
+    event_slugs = {_name_slug(participant) for participant in event.get("participants", [])}
+    for name in names:
+        slug = _name_slug(name)
+        if slug and slug in event_slugs:
+            return True
+        if str(name).strip() and _normalize_evidence_text(str(name)) in _normalize_evidence_text(event_text):
+            return True
+
+    return _normalize_evidence_text(str(character_evidence)) == _normalize_evidence_text(
+        str(event.get("evidence", ""))
+    )
+
+
+def _name_slug(value: Any) -> str:
+    return "_".join(re.findall(r"[a-z0-9]+", str(value).lower()))
 
 
 def previous_cumulative_summary(base_dir: Path, before_chapter: int) -> str | None:

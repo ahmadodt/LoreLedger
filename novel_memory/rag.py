@@ -189,7 +189,11 @@ def _chapter_summary_documents(base_dir: Path) -> list[dict[str, Any]]:
         chapter_number = int(summary["chapter_number"])
         chapter_title = summary["chapter_title"]
         parts = [summary.get("chapter_summary", "")]
-        parts.extend(summary.get("important_events", []))
+        event_bits = [_event_document_text(event) for event in summary.get("events", [])]
+        if event_bits:
+            parts.extend(event_bits)
+        else:
+            parts.extend(summary.get("important_events", []))
         character_bits = [
             f"{character.get('name', '')}: {character.get('update', '')}"
             for character in summary.get("characters", [])
@@ -208,6 +212,23 @@ def _chapter_summary_documents(base_dir: Path) -> list[dict[str, Any]]:
             )
         )
     return documents
+
+
+def _event_document_text(event: dict[str, Any]) -> str:
+    description = str(event.get("description", "")).strip()
+    if not description:
+        return ""
+    event_type = str(event.get("event_type", "")).strip()
+    participants = ", ".join(str(participant).strip() for participant in event.get("participants", []) if str(participant).strip())
+    evidence = str(event.get("evidence", "")).strip()
+    parts = [f"Event: {description}"]
+    if event_type:
+        parts.append(f"Type: {event_type}")
+    if participants:
+        parts.append(f"Participants: {participants}")
+    if evidence:
+        parts.append(f"Evidence: {evidence}")
+    return ". ".join(parts)
 
 
 def _character_timeline_documents(base_dir: Path) -> list[dict[str, Any]]:
