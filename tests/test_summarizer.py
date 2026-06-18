@@ -69,7 +69,13 @@ def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
             "chapter_number": 1,
             "chapter_title": "First",
             "chapter_url": "https://example.test/1",
-            "chapter_summary": "Arn enters the city.",
+            "chapter_summary": {
+                "situation": "Arn enters the city.",
+                "conflict": "",
+                "turning_point": "",
+                "consequence": "",
+                "hook": "",
+            },
             "important_events": [],
             "characters": [],
         },
@@ -80,7 +86,13 @@ def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
         def summarize_chapter(self, chapter, previous_summary):
             calls["previous_summary"] = previous_summary
             return {
-                "chapter_summary": "Arn meets Mira.",
+                "chapter_summary": {
+                    "situation": "Arn meets Mira.",
+                    "conflict": "",
+                    "turning_point": "",
+                    "consequence": "",
+                    "hook": "",
+                },
                 "important_events": ["Arn meets Mira."],
                 "characters": [
                     {
@@ -108,7 +120,13 @@ def test_previous_cumulative_summary_uses_only_five_latest_summaries(tmp_path: P
                 "chapter_number": number,
                 "chapter_title": f"Chapter {number}",
                 "chapter_url": f"https://example.test/{number}",
-                "chapter_summary": f"Summary {number}",
+                "chapter_summary": {
+                    "situation": f"Summary {number}",
+                    "conflict": "",
+                    "turning_point": "",
+                    "consequence": "",
+                    "hook": "",
+                },
                 "important_events": [],
                 "characters": [],
             },
@@ -135,7 +153,13 @@ def test_previous_cumulative_summary_keeps_all_when_fewer_than_limit(tmp_path: P
                 "chapter_number": number,
                 "chapter_title": f"Chapter {number}",
                 "chapter_url": f"https://example.test/{number}",
-                "chapter_summary": f"Summary {number}",
+                "chapter_summary": {
+                    "situation": f"Summary {number}",
+                    "conflict": "",
+                    "turning_point": "",
+                    "consequence": "",
+                    "hook": "",
+                },
                 "important_events": [],
                 "characters": [],
             },
@@ -155,7 +179,13 @@ def test_chapter_range_maintains_rolling_five_summary_context(tmp_path: Path):
         def summarize_chapter(self, chapter, previous_summary):
             contexts.append(previous_summary)
             return {
-                "chapter_summary": f"Summary {chapter['number']}",
+                "chapter_summary": {
+                    "situation": f"Summary {chapter['number']}",
+                    "conflict": "",
+                    "turning_point": "",
+                    "consequence": "",
+                    "hook": "",
+                },
                 "important_events": [],
                 "characters": [],
             }
@@ -206,16 +236,36 @@ def test_llama_cpp_summarizer_loads_hugging_face_gguf(monkeypatch):
     }
 
 
+def test_llama_cpp_summarizer_passes_all_gpu_layers_value(monkeypatch):
+    calls = {}
+
+    class FakeLlama:
+        @classmethod
+        def from_pretrained(cls, **kwargs):
+            calls.update(kwargs)
+            return cls()
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+
+    LlamaCppSummarizer(
+        model_repo="example/model-GGUF",
+        model_file="model.gguf",
+        gpu_layers=-1,
+    )
+
+    assert calls["n_gpu_layers"] == -1
+
+
 def test_llama_cpp_summarizer_retries_with_validation_correction(monkeypatch):
     prompts = []
     responses = [
         """{
-          "chapter_summary": "Simon dies.",
+          "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
           "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
           "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon defeats the rats."}]
         }""",
         """{
-          "chapter_summary": "Simon dies.",
+          "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
           "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
           "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
         }""",
@@ -292,8 +342,8 @@ def test_build_prompt_guides_strict_story_memory_summary():
     assert "Return strict JSON only" in prompt
     assert "Use only the provided chapter text for new facts" in prompt
     assert "previous cumulative summary only for continuity" in prompt
-    assert "4-8 concise sentences" in prompt
-    assert "3-6 atomic, evidence-backed events" in prompt
+    assert "one to three sentences" in prompt
+    assert "3 to 10 atomic evidence-backed events" in prompt
     assert "Every event must use exactly one event_type" in prompt
     assert "Every event must include participants" in prompt
     assert "Every event involving a named character whose state changes must have a matching character update" in prompt
@@ -307,7 +357,7 @@ def test_build_prompt_guides_strict_story_memory_summary():
 def test_normalize_summary_accepts_evidence_backed_events_and_derives_important_events():
     summary = normalize_summary(
         {
-            "chapter_summary": "Arn meets Mira.",
+            "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
             "events": [
                 {
                     "description": "Arn meets Mira.",
@@ -337,7 +387,7 @@ def test_normalize_summary_rejects_invalid_event_evidence():
     with pytest.raises(ValueError, match="Event evidence for '1' was not found"):
         normalize_summary(
             {
-                "chapter_summary": "Arn meets Mira.",
+                "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "events": [
                     {
                         "description": "Arn meets Mira.",
@@ -356,7 +406,7 @@ def test_normalize_summary_rejects_named_event_without_participants():
     with pytest.raises(ValueError, match="participants"):
         normalize_summary(
             {
-                "chapter_summary": "Arn meets Mira.",
+                "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "events": [
                     {
                         "description": "Arn meets Mira.",
@@ -375,7 +425,7 @@ def test_normalize_summary_rejects_major_character_update_without_related_event(
     with pytest.raises(ValueError, match="major state change"):
         normalize_summary(
             {
-                "chapter_summary": "Arn heals Mira.",
+                "chapter_summary": {"situation": "Arn heals Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "events": [
                     {
                         "description": "Arn finds a locked door.",
@@ -401,12 +451,12 @@ def test_llama_cpp_summarizer_retries_with_event_validation_correction(monkeypat
     prompts = []
     responses = [
         """{
-          "chapter_summary": "Simon dies.",
+          "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
           "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon defeats the rats."}],
           "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
         }""",
         """{
-          "chapter_summary": "Simon dies.",
+          "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
           "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
           "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
         }""",
@@ -435,7 +485,7 @@ def test_normalize_summary_rejects_named_events_without_character_updates():
     with pytest.raises(ValueError, match="important events involving named characters"):
         normalize_summary(
             {
-                "chapter_summary": "Simon finds the dungeon and dies.",
+                "chapter_summary": {"situation": "Simon finds the dungeon and dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "important_events": ["Simon dies from rat bites."],
                 "characters": [],
             },
@@ -451,7 +501,7 @@ def test_normalize_summary_rejects_named_events_without_character_updates():
 def test_normalize_summary_accepts_whitespace_normalized_evidence():
     summary = normalize_summary(
         {
-            "chapter_summary": "Arn meets Mira.",
+            "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
             "important_events": ["Arn meets Mira."],
             "characters": [
                 {
@@ -471,7 +521,7 @@ def test_normalize_summary_accepts_whitespace_normalized_evidence():
 def test_normalize_summary_accepts_evidence_with_typographic_punctuation_changes():
     summary = normalize_summary(
         {
-            "chapter_summary": "Arn answers Mira.",
+            "chapter_summary": {"situation": "Arn answers Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
             "important_events": ["Arn answers Mira."],
             "characters": [
                 {
@@ -500,7 +550,7 @@ def test_normalize_summary_rejects_invalid_character_evidence(evidence, message)
     with pytest.raises(ValueError, match=message):
         normalize_summary(
             {
-                "chapter_summary": "Arn finds Mira.",
+                "chapter_summary": {"situation": "Arn finds Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "important_events": ["Arn finds Mira."],
                 "characters": [
                     {
@@ -518,7 +568,7 @@ def test_normalize_summary_rejects_invalid_character_evidence(evidence, message)
 def test_found_dead_update_preserves_source_attribution():
     summary = normalize_summary(
         {
-            "chapter_summary": "Simon finds the tavern maid dead.",
+            "chapter_summary": {"situation": "Simon finds the tavern maid dead.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
             "important_events": ["Simon finds the tavern maid already dead."],
             "characters": [
                 {
@@ -543,7 +593,13 @@ def test_summarize_chapter_range_skips_existing_by_default(tmp_path: Path):
             "chapter_number": 2,
             "chapter_title": "Chapter 2",
             "chapter_url": "https://example.test/2",
-            "chapter_summary": "Already summarized.",
+            "chapter_summary": {
+                "situation": "Already summarized.",
+                "conflict": "",
+                "turning_point": "",
+                "consequence": "",
+                "hook": "",
+            },
             "important_events": [],
             "characters": [],
         },
@@ -559,7 +615,7 @@ def test_summarize_chapter_range_skips_existing_by_default(tmp_path: Path):
     )
 
     assert saved == [tmp_path / "summaries" / "chapter_0003.json"]
-    assert read_json(tmp_path / "summaries" / "chapter_0002.json")["chapter_summary"] == "Already summarized."
+    assert read_json(tmp_path / "summaries" / "chapter_0002.json")["chapter_summary"]["situation"] == "Already summarized."
     assert any(event["step"] == "skipped" and event["chapter_number"] == 2 for event in events)
     assert any(event["step"] == "saved" and event["chapter_number"] == 3 for event in events)
 
@@ -572,7 +628,13 @@ def test_summarize_chapter_range_regenerates_when_forced(tmp_path: Path):
             "chapter_number": 2,
             "chapter_title": "Chapter 2",
             "chapter_url": "https://example.test/2",
-            "chapter_summary": "Old summary.",
+            "chapter_summary": {
+                "situation": "Old summary.",
+                "conflict": "",
+                "turning_point": "",
+                "consequence": "",
+                "hook": "",
+            },
             "important_events": [],
             "characters": [],
         },
@@ -581,7 +643,7 @@ def test_summarize_chapter_range_regenerates_when_forced(tmp_path: Path):
     saved = summarize_chapter_range(tmp_path, FakeSummarizer(), start_chapter=2, end_chapter=2, force=True)
 
     assert saved == [tmp_path / "summaries" / "chapter_0002.json"]
-    assert read_json(tmp_path / "summaries" / "chapter_0002.json")["chapter_summary"] == "Arn does thing 2"
+    assert read_json(tmp_path / "summaries" / "chapter_0002.json")["chapter_summary"]["situation"] == "Arn does thing 2"
     assert (tmp_path / "characters" / "arn.json").exists()
 
 
@@ -633,7 +695,7 @@ def test_chapter_range_logs_failure_and_continues(tmp_path: Path):
                     ]
                 )
             return {
-                "chapter_summary": "Arn completes chapter 2.",
+                "chapter_summary": {"situation": "Arn completes chapter 2.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "important_events": ["Arn completes chapter 2."],
                 "characters": [
                     {
@@ -713,7 +775,7 @@ def test_background_summarization_job_closes_model(tmp_path: Path, monkeypatch):
 
         def summarize_chapter(self, chapter, previous_summary):
             return {
-                "chapter_summary": f"Summary for {chapter['number']}",
+                "chapter_summary": {"situation": f"Summary for {chapter['number']}", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "important_events": [],
                 "characters": [],
             }
@@ -760,7 +822,7 @@ def test_background_job_tracks_failed_chapters_and_finishes(tmp_path: Path, monk
                     [{"attempt": 1, "error_type": "ValueError", "error": "bad", "model_output": "bad"}]
                 )
             return {
-                "chapter_summary": "Summary 2",
+                "chapter_summary": {"situation": "Summary 2", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
                 "important_events": [],
                 "characters": [],
             }

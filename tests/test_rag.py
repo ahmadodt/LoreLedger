@@ -1,8 +1,36 @@
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
-from novel_memory.rag import FakeStoryAnswerer, answer_question, build_rag_index, retrieve_context
+from novel_memory.rag import (
+    FakeStoryAnswerer,
+    LlamaCppStoryAnswerer,
+    answer_question,
+    build_rag_index,
+    retrieve_context,
+)
+
+
+def test_llama_cpp_story_answerer_passes_all_gpu_layers_value(monkeypatch):
+    calls = {}
+
+    class FakeLlama:
+        @classmethod
+        def from_pretrained(cls, **kwargs):
+            calls.update(kwargs)
+            return cls()
+
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=FakeLlama))
+
+    LlamaCppStoryAnswerer(
+        model_repo="example/model-GGUF",
+        model_file="model.gguf",
+        gpu_layers=-1,
+    )
+
+    assert calls["n_gpu_layers"] == -1
 
 
 def test_build_rag_index_uses_summaries_characters_and_chapters(tmp_path: Path):
@@ -88,7 +116,13 @@ def _write_fixture_novel(base_dir: Path) -> None:
             "chapter_number": 1,
             "chapter_title": "The Arena",
             "chapter_url": "https://example.test/1",
-            "chapter_summary": "Arn survives an arena fight.",
+            "chapter_summary": {
+                "situation": "Arn survives an arena fight.",
+                "conflict": "",
+                "turning_point": "",
+                "consequence": "",
+                "hook": "",
+            },
             "important_events": ["Arn is taken to a ludus."],
             "characters": [
                 {
@@ -105,7 +139,13 @@ def _write_fixture_novel(base_dir: Path) -> None:
             "chapter_number": 2,
             "chapter_title": "The Healer",
             "chapter_url": "https://example.test/2",
-            "chapter_summary": "Mira heals Arn and warns him.",
+            "chapter_summary": {
+                "situation": "Mira heals Arn and warns him.",
+                "conflict": "",
+                "turning_point": "",
+                "consequence": "",
+                "hook": "",
+            },
             "important_events": ["Mira warns Arn about the patron."],
             "events": [
                 {

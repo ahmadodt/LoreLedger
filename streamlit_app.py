@@ -116,7 +116,30 @@ def format_elapsed(seconds: int) -> str:
 
 def render_summary(summary: dict[str, Any]) -> None:
     st.success("Summary exists.")
-    st.write(summary.get("chapter_summary", ""))
+    chapter_summary = summary.get("chapter_summary", {})
+    for label, key in [
+        ("Situation", "situation"),
+        ("Conflict", "conflict"),
+        ("Turning point", "turning_point"),
+        ("Consequence", "consequence"),
+        ("Hook", "hook"),
+    ]:
+        value = chapter_summary.get(key, "").strip()
+        if value:
+            st.markdown(f"**{label}:** {value}")
+    pov = summary.get("pov_character")
+    if pov:
+        st.caption(f"POV: {pov}")
+    time_skip = summary.get("time_skip")
+    if time_skip:
+        st.caption(f"Time skip: {time_skip}")
+    locations = summary.get("locations", [])
+    if locations:
+        st.write("**Locations**")
+        for loc in locations:
+            name = loc.get("name", "")
+            desc = loc.get("description", "")
+            st.write(f"- **{name}**: {desc}" if desc else f"- {name}")
     if summary.get("events"):
         st.write("Important events")
         for event in summary["events"]:
@@ -171,7 +194,14 @@ def local_model_config() -> dict[str, Any]:
     )
     model_file = st.sidebar.text_input("Model file", value="*Q4_K_M.gguf")
     context_size = st.sidebar.number_input("Context size", min_value=512, max_value=32768, value=16896, step=512)
-    gpu_layers = st.sidebar.number_input("GPU layers", min_value=0, max_value=100, value=20, step=1)
+    gpu_layers = st.sidebar.number_input(
+        "GPU layers",
+        min_value=-1,
+        max_value=100,
+        value=20,
+        step=1,
+        help="Use -1 to request that llama.cpp offload all model layers to the GPU.",
+    )
     temperature = st.sidebar.slider(
         "Generation randomness",
         min_value=0.0,

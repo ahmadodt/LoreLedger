@@ -37,6 +37,8 @@ EVENT_TYPES = {
     "location",
     "other",
 }
+CHAPTER_SUMMARY_FIELDS = ("situation", "conflict", "turning_point", "consequence", "hook")
+CONTINUITY_FLAG_TYPES = {"contradiction", "resolution", "callback"}
 MAJOR_CHARACTER_UPDATE_TERMS = {
     "dies",
     "dead",
@@ -149,7 +151,13 @@ class FakeSummarizer:
             )
         return normalize_summary(
             {
-                "chapter_summary": first_sentence[:300],
+                "chapter_summary": {
+                    "situation": first_sentence[:300],
+                    "conflict": "",
+                    "turning_point": "",
+                    "consequence": "",
+                    "hook": "",
+                },
                 "events": events,
                 "characters": [
                     {
@@ -162,6 +170,11 @@ class FakeSummarizer:
             },
             chapter,
         )
+
+
+def chapter_summary_to_str(chapter_summary: dict[str, Any]) -> str:
+    parts = [str(chapter_summary.get(f, "")).strip() for f in CHAPTER_SUMMARY_FIELDS]
+    return " ".join(p for p in parts if p)
 
 
 def build_prompt(
@@ -183,31 +196,73 @@ Do not invent events, motives, names, relationships, powers, or explanations tha
 Return strict JSON only. Do not include markdown, comments, prose before the JSON, or prose after the JSON.
 Use this exact JSON shape:
 {{
-  "chapter_summary": "4-8 concise sentences summarizing this chapter",
+  "chapter_summary": {{
+    "situation": "What state the world or characters are in at the start of this chapter",
+    "conflict": "The main tension or problem driving this chapter",
+    "turning_point": "The key decision, revelation, or action that changes things",
+    "consequence": "What concretely changed as a result",
+    "hook": "What is left unresolved or set up for a future chapter"
+  }},
+  "pov_character": "Name of the point-of-view character, or null if omniscient or unclear",
+  "time_skip": "Any time skip mentioned at the start of this chapter, e.g. '3 days later', or null",
+  "locations": [
+    {{"name": "Location name as written in the chapter", "description": "one sentence description", "evidence": "short exact excerpt from the chapter"}}
+  ],
   "events": [
     {{"description": "one atomic concrete event or state change", "event_type": "action|discovery|decision|relationship|injury|death|ability|faction|revelation|location|other", "participants": ["Character or entity name"], "evidence": "short exact excerpt from the chapter"}}
   ],
   "characters": [
     {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter", "evidence": "short exact excerpt from the chapter"}}
+  ],
+  "continuity_flags": [
+    {{"type": "contradiction|resolution|callback", "description": "what was flagged and why", "evidence": "short exact excerpt from the chapter"}}
   ]
 }}
 
 Guidelines:
-- chapter_summary should preserve plot progression, consequences, reveals, decisions, conflicts, and unresolved hooks.
-- events should contain 3-6 atomic, evidence-backed events or state changes that matter after this chapter.
+
+chapter_summary:
+- Each of the five fields should be one to three sentences.
+- If a field has no supported content, use an empty string.
+- Base every field only on this chapter's text, not the previous summary.
+
+pov_character:
+- Use the name as written in the chapter. Use null if the chapter has no clear single POV.
+
+time_skip:
+- Only fill this if the chapter explicitly states a time gap. Use null otherwise.
+
+locations:
+- Include every named place that features meaningfully in this chapter.
+- Description should be brief, one sentence max.
+- Evidence must be a short exact excerpt from the chapter, at most 25 words.
+
+events:
+- Include 3 to 10 atomic evidence-backed events or state changes that matter after this chapter.
 - Every event must use exactly one event_type from: action, discovery, decision, relationship, injury, death, ability, faction, revelation, location, other.
-- Every event must include participants for named characters, factions, groups, places, or artifacts directly involved in the event.
+- Every event must include participants listing named characters, factions, groups, places, or artifacts directly involved.
 - Every event must include one short evidence excerpt copied exactly from the current chapter text.
-- characters should include every named character whose state meaningfully changes in this chapter.
+- Do not infer causation. Finding, witnessing, or learning about an event does not mean the character caused it.
+- If a character finds someone already dead, say they found the person dead. Do not claim they killed them.
+
+characters:
+- Include every named character whose state meaningfully changes in this chapter.
 - Every event involving a named character whose state changes must have a matching character update.
-- character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
-- Every character update must include one short evidence excerpt copied exactly from the current chapter text.
-- Evidence should be the shortest useful clause or sentence, preferably at most 25 words and never more than 50. Do not use previous summaries as evidence.
-- Do not infer causation. Finding, witnessing, discussing, or learning about an event does not mean the character caused it.
-- In particular, if a character finds someone already dead, say they found the person dead; do not claim they killed them.
-- Keep the character list concise. Do not create entries for generic enemies, crowds, or unnamed incidental people unless their change matters beyond this chapter.
-- Keep names, aliases, titles, groups, places, and artifacts as written in the chapter when possible.
-- If a field has no supported content, use an empty string or empty array as appropriate.
+- Character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
+- Do not create entries for generic enemies, crowds, or unnamed incidental people unless their change matters beyond this chapter.
+- Keep names, aliases, titles, groups, places, and artifacts as written in the chapter.
+
+evidence (all fields):
+- Evidence must be the shortest useful clause or sentence from the current chapter text.
+- Prefer at most 25 words. Never exceed 50 words.
+- Never use the previous summary as evidence.
+
+continuity_flags:
+- Compare this chapter against the previous summary and flag anything notable.
+- contradiction: this chapter states something that conflicts with established facts.
+- resolution: this chapter resolves an unresolved hook or open question from before.
+- callback: this chapter references or pays off something established earlier.
+- If nothing notable, use an empty array.
 {correction_text}
 
 Previous cumulative summary:
@@ -237,6 +292,7 @@ def parse_json_response(text: str) -> dict[str, Any]:
 
 def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str, Any]:
     chapter_text = str(chapter.get("text", ""))
+    chapter_summary = _normalize_chapter_summary(data)
     events = _normalize_events(data, chapter_text)
     characters = []
     for item in data.get("characters", []):
@@ -253,14 +309,25 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
     if not important_events:
         important_events = [str(event).strip() for event in data.get("important_events", []) if str(event).strip()]
 
+    pov_character = data.get("pov_character")
+    pov_character = str(pov_character).strip() if pov_character is not None else None
+    time_skip = data.get("time_skip")
+    time_skip = str(time_skip).strip() if time_skip is not None else None
+    locations = _normalize_locations(data, chapter_text)
+    continuity_flags = _normalize_continuity_flags(data, chapter_text)
+
     summary = {
         "chapter_number": int(chapter["number"]),
         "chapter_title": chapter["title"],
         "chapter_url": chapter["url"],
-        "chapter_summary": str(data.get("chapter_summary", "")).strip(),
+        "chapter_summary": chapter_summary,
+        "pov_character": pov_character,
+        "time_skip": time_skip,
+        "locations": locations,
         "important_events": important_events,
         "events": events,
         "characters": characters,
+        "continuity_flags": continuity_flags,
     }
     validate_summary(summary)
     return summary
@@ -305,6 +372,57 @@ def _normalize_events(data: dict[str, Any], chapter_text: str) -> list[dict[str,
         )
 
     return events
+
+
+def _normalize_chapter_summary(data: dict[str, Any]) -> dict[str, Any]:
+    raw = data.get("chapter_summary")
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "Field 'chapter_summary' must be a JSON object with fields: "
+            "situation, conflict, turning_point, consequence, hook."
+        )
+    return {field: str(raw.get(field, "")).strip() for field in CHAPTER_SUMMARY_FIELDS}
+
+
+def _normalize_locations(data: dict[str, Any], chapter_text: str) -> list[dict[str, Any]]:
+    raw = data.get("locations", [])
+    if not isinstance(raw, list):
+        raise ValueError("Field 'locations' must be an array.")
+    locations = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        description = str(item.get("description", "")).strip()
+        evidence = str(item.get("evidence", "")).strip()
+        _validate_evidence("Location", name, evidence, chapter_text)
+        locations.append({"name": name, "description": description, "evidence": evidence})
+    return locations
+
+
+def _normalize_continuity_flags(data: dict[str, Any], chapter_text: str) -> list[dict[str, Any]]:
+    raw = data.get("continuity_flags", [])
+    if not isinstance(raw, list):
+        raise ValueError("Field 'continuity_flags' must be an array.")
+    flags = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        flag_type = str(item.get("type", "")).strip().lower()
+        if flag_type not in CONTINUITY_FLAG_TYPES:
+            raise ValueError(
+                f"Continuity flag field 'type' must be one of: {', '.join(sorted(CONTINUITY_FLAG_TYPES))}."
+            )
+        description = str(item.get("description", "")).strip()
+        if not description:
+            continue
+        evidence = str(item.get("evidence", "")).strip()
+        if evidence:
+            _validate_evidence("Continuity flag", flag_type, evidence, chapter_text)
+        flags.append({"type": flag_type, "description": description, "evidence": evidence})
+    return flags
 
 
 def _validate_evidence(kind: str, label: str, evidence: str, chapter_text: str) -> None:
@@ -419,7 +537,7 @@ def _previous_summary_lines(base_dir: Path, before_chapter: int) -> list[str]:
         if chapter_number >= before_chapter:
             continue
 
-        chapter_summary = summary.get("chapter_summary", "")
+        chapter_summary = chapter_summary_to_str(summary.get("chapter_summary", {}))
         if not chapter_summary:
             continue
 
@@ -595,9 +713,9 @@ def summarize_chapter_range(
                 path=str(out_path),
             )
 
-        chapter_summary = summary.get("chapter_summary", "")
-        if chapter_summary:
-            previous_summary_lines.append(f"Chapter {summary['chapter_number']}: {chapter_summary}")
+        chapter_summary_text = chapter_summary_to_str(summary.get("chapter_summary", {}))
+        if chapter_summary_text:
+            previous_summary_lines.append(f"Chapter {summary['chapter_number']}: {chapter_summary_text}")
             previous_summary_lines = previous_summary_lines[-PREVIOUS_SUMMARY_LIMIT:]
 
     return saved_paths

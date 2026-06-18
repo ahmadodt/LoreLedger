@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from .io import read_json, write_json
 from .paths import ensure_novel_dirs
 from .scraper import iter_chapter_files
+from .summarizer import chapter_summary_to_str
 
 
 RAG_INDEX_VERSION = 1
@@ -188,7 +189,7 @@ def _chapter_summary_documents(base_dir: Path) -> list[dict[str, Any]]:
         summary = read_json(path)
         chapter_number = int(summary["chapter_number"])
         chapter_title = summary["chapter_title"]
-        parts = [summary.get("chapter_summary", "")]
+        parts = [chapter_summary_to_str(summary.get("chapter_summary", {}))]
         event_bits = [_event_document_text(event) for event in summary.get("events", [])]
         if event_bits:
             parts.extend(event_bits)
