@@ -20,4 +20,33 @@ Scrape → Summarize → Index → Ask
 - Every extracted event must include evidence quoted exactly from the chapter text
 - chapter_summary is always a dict with 5 fields: situation, conflict, turning_point, 
   consequence, hook — never a plain string
-- No backward compatibility code — old
+- No backward compatibility code — old summaries are deleted when schema changes
+
+## Hardware Constraints
+- 4GB VRAM (RTX), local GGUF model via llama-cpp-python
+- No external APIs, no OpenAI, no Anthropic API calls
+- Do not add dependencies that require GPU memory beyond this
+
+## Testing Rules
+- Always run pytest after making changes
+- Never skip failing tests — fix them or ask
+- Do not add new dependencies without checking first
+
+## Do Not
+- Add backward compatibility code
+- Over-engineer with unnecessary abstractions or helper classes
+- Modify novels_extracted/ data directly
+- Add new pip dependencies without asking
+
+## Off-Limits Directories
+Do not read or modify:
+- /novels_extracted
+- /__pycache__
+- /.pytest_cache
+
+## Commit Format
+feat:     new feature or behavior
+refactor: same behavior, cleaner structure  
+fix:      bug fix
+test:     adding or updating tests
+docs:     changes to documentation
