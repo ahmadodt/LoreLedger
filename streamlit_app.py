@@ -10,7 +10,15 @@ from novel_memory.env import load_project_env
 from novel_memory.io import read_json
 from novel_memory.memory import character_summary_until
 from novel_memory.paths import OUTPUT_ROOT, ensure_novel_dirs, novel_dir
-from novel_memory.rag import FakeStoryAnswerer, LlamaCppStoryAnswerer, answer_question, build_rag_index, retrieve_context
+from novel_memory.rag import (
+    FakeStoryAnswerer,
+    LlamaCppStoryAnswerer,
+    answer_question,
+    build_embedding_index,
+    build_rag_index,
+    retrieve_embedding_context,
+    retrieve_context,
+)
 from novel_memory.scraper import iter_chapter_files, scrape_royalroad
 from novel_memory.summarization_jobs import (
     elapsed_seconds,
@@ -556,11 +564,17 @@ with tabs[3]:
         selected_novel = st.selectbox("Novel to ask about", novels, format_func=novel_label)
         base_dir = novel_dir(selected_novel["slug"], output_root)
         ensure_novel_dirs(base_dir)
-        index_path = base_dir / "indexes" / "rag.json"
 
         left, right = st.columns([1.1, 0.9], gap="large")
         with left:
             st.subheader("Ask a question")
+            retrieval_label = st.radio(
+                "Retrieval mode",
+                ["TF-IDF", "Semantic (Embeddings)"],
+                horizontal=True,
+            )
+            retrieval_mode = "semantic" if retrieval_label == "Semantic (Embeddings)" else "tfidf"
+            index_path = base_dir / "indexes" / ("embeddings.json" if retrieval_mode == "semantic" else "rag.json")
             question = st.text_input("Question", placeholder="Who is Arn?")
             top_k = st.slider(
                 "Retrieved context count",
@@ -574,7 +588,10 @@ with tabs[3]:
             with button_cols[0]:
                 if st.button("Build RAG index", use_container_width=True):
                     try:
-                        path = build_rag_index(base_dir, force=True)
+                        if retrieval_mode == "semantic":
+                            path = build_embedding_index(base_dir, force=True)
+                        else:
+                            path = build_rag_index(base_dir, force=True)
                         st.success(f"Saved {path.name}.")
                     except Exception as exc:
                         st.error(f"Indexing failed: {exc}")
@@ -588,7 +605,10 @@ with tabs[3]:
                 else:
                     try:
                         with st.spinner("Retrieving context and answering..."):
-                            build_rag_index(base_dir)
+                            if retrieval_mode == "semantic":
+                                build_embedding_index(base_dir)
+                            else:
+                                build_rag_index(base_dir)
                             answerer = build_story_answerer(summarizer_config)
                             try:
                                 result = answer_question(
@@ -596,6 +616,7 @@ with tabs[3]:
                                     question.strip(),
                                     answerer,
                                     top_k=int(top_k),
+                                    retrieval_mode=retrieval_mode,
                                 )
                             finally:
                                 close = getattr(answerer, "close", None)
@@ -614,7 +635,12 @@ with tabs[3]:
 
             preview_question = question.strip() if question.strip() else "Who is the main character?"
             try:
-                contexts = retrieve_context(base_dir, preview_question, top_k=3) if index_path.exists() else []
+                if not index_path.exists():
+                    contexts = []
+                elif retrieval_mode == "semantic":
+                    contexts = retrieve_embedding_context(base_dir, preview_question, top_k=3)
+                else:
+                    contexts = retrieve_context(base_dir, preview_question, top_k=3)
                 for context in contexts:
                     st.caption(f"{context.reference} | {context.source_type} | {context.score:.3f}")
                     st.write(context.text[:450])
