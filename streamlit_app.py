@@ -20,6 +20,7 @@ from novel_memory.rag import (
     retrieve_bm25_context,
     retrieve_embedding_context,
     retrieve_hybrid_context,
+    retrieve_story_context,
     retrieve_context,
 )
 from novel_memory.scraper import iter_chapter_files, scrape_royalroad
@@ -591,6 +592,7 @@ with tabs[3]:
                     or (base_dir / "indexes" / "embeddings.json").exists()
                 )
             )
+            rerank_enabled = st.checkbox("Enable Re-ranking", value=False)
             question = st.text_input("Question", placeholder="Who is Arn?")
             top_k = st.slider(
                 "Retrieved context count",
@@ -641,13 +643,15 @@ with tabs[3]:
                                     base_dir,
                                     question.strip(),
                                     answerer,
-                                    top_k=int(top_k),
+                                    top_k=10 if rerank_enabled else int(top_k),
                                     retrieval_mode=retrieval_mode,
+                                    rerank=rerank_enabled,
                                 )
                             finally:
                                 close = getattr(answerer, "close", None)
                                 if callable(close):
                                     close()
+                        st.caption(f"Retrieval: {retrieval_label} | Re-ranking: {'on' if rerank_enabled else 'off'}")
                         st.write(result["answer"])
                     except Exception as exc:
                         st.error(f"Question failed: {exc}")
@@ -663,6 +667,14 @@ with tabs[3]:
             try:
                 if not index_exists:
                     contexts = []
+                elif rerank_enabled:
+                    contexts = retrieve_story_context(
+                        base_dir,
+                        preview_question,
+                        top_k=10,
+                        retrieval_mode=retrieval_mode,
+                        rerank=True,
+                    )
                 elif retrieval_mode == "semantic":
                     contexts = retrieve_embedding_context(base_dir, preview_question, top_k=3)
                 elif retrieval_mode == "hybrid":

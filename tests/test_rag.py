@@ -16,7 +16,10 @@ from novel_memory.rag import (
     retrieve_bm25_context,
     retrieve_embedding_context,
     retrieve_hybrid_context,
+    retrieve_story_context,
+    rerank_contexts,
     retrieve_context,
+    _load_reranker_model,
     _normalize_scores,
 )
 
@@ -192,6 +195,93 @@ def test_normalize_scores_uses_zero_to_one_range_and_handles_equal_scores():
     assert _normalize_scores({"left": 0.0, "right": 0.0}) == {"left": 0.0, "right": 0.0}
 
 
+def test_rerank_contexts_uses_cross_encoder_scores(monkeypatch):
+    contexts = [
+        _context("chapter:0001:001", 1, "The Arena"),
+        _context("chapter:0002:001", 2, "The Healer"),
+    ]
+    model = FakeReranker([0.2, 0.9])
+    monkeypatch.setattr("novel_memory.rag._load_reranker_model", lambda: model)
+
+    reranked = rerank_contexts("Where is Mira?", contexts, top_k=2)
+
+    assert [context.id for context in reranked] == ["chapter:0002:001", "chapter:0001:001"]
+    assert [context.score for context in reranked] == [0.9, 0.2]
+    assert model.pairs == [("Where is Mira?", context.text) for context in contexts]
+
+
+def test_rerank_contexts_returns_top_k_by_reranker_score(monkeypatch):
+    contexts = [
+        _context("chapter:0001:001", 1, "The Arena"),
+        _context("chapter:0002:001", 2, "The Healer"),
+        _context("chapter:0003:001", 3, "The Patron"),
+        _context("chapter:0004:001", 4, "The Road"),
+    ]
+    monkeypatch.setattr("novel_memory.rag._load_reranker_model", lambda: FakeReranker([0.1, 0.8, 0.7, 0.2]))
+
+    reranked = rerank_contexts("Where is Mira?", contexts, top_k=3)
+
+    assert [context.id for context in reranked] == ["chapter:0002:001", "chapter:0003:001", "chapter:0004:001"]
+
+
+def test_retrieve_story_context_reranks_each_retriever(monkeypatch, tmp_path: Path):
+    captured = []
+    base_results = {
+        "tfidf": [_context(f"tfidf:{index}", index, f"TFIDF {index}") for index in range(1, 12)],
+        "bm25": [_context(f"bm25:{index}", index, f"BM25 {index}") for index in range(1, 12)],
+        "semantic": [_context(f"semantic:{index}", index, f"Semantic {index}") for index in range(1, 12)],
+        "hybrid": [_context(f"hybrid:{index}", index, f"Hybrid {index}") for index in range(1, 12)],
+    }
+
+    def fake_retrieve_context(_base_dir, _question, top_k=5):
+        captured.append(("tfidf", top_k))
+        return base_results["tfidf"][:top_k]
+
+    def fake_retrieve_bm25_context(_base_dir, _question, top_k=5):
+        captured.append(("bm25", top_k))
+        return base_results["bm25"][:top_k]
+
+    def fake_retrieve_embedding_context(_base_dir, _question, top_k=5):
+        captured.append(("semantic", top_k))
+        return base_results["semantic"][:top_k]
+
+    def fake_retrieve_hybrid_context(_base_dir, _question, top_k=5):
+        captured.append(("hybrid", top_k))
+        return base_results["hybrid"][:top_k]
+
+    monkeypatch.setattr("novel_memory.rag.retrieve_context", fake_retrieve_context)
+    monkeypatch.setattr("novel_memory.rag.retrieve_bm25_context", fake_retrieve_bm25_context)
+    monkeypatch.setattr("novel_memory.rag.retrieve_embedding_context", fake_retrieve_embedding_context)
+    monkeypatch.setattr("novel_memory.rag.retrieve_hybrid_context", fake_retrieve_hybrid_context)
+    monkeypatch.setattr("novel_memory.rag._load_reranker_model", lambda: DescendingReranker())
+
+    for mode in ("tfidf", "bm25", "semantic", "hybrid"):
+        contexts = retrieve_story_context(tmp_path, "question", retrieval_mode=mode, rerank=True)
+        assert len(contexts) == 3
+        assert all(context.id.startswith(f"{mode}:") for context in contexts)
+        assert [context.id.rsplit(":", 1)[1] for context in contexts] == ["10", "9", "8"]
+
+    assert captured == [("tfidf", 10), ("bm25", 10), ("semantic", 10), ("hybrid", 10)]
+
+
+def test_reranker_model_loader_is_cached(monkeypatch):
+    _load_reranker_model.cache_clear()
+    calls = []
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name, device):
+            calls.append((model_name, device))
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(CrossEncoder=FakeCrossEncoder))
+
+    first = _load_reranker_model()
+    second = _load_reranker_model()
+
+    assert first is second
+    assert calls == [("cross-encoder/ms-marco-MiniLM-L-6-v2", "cpu")]
+    _load_reranker_model.cache_clear()
+
+
 def test_retrieve_context_returns_relevant_character_context(tmp_path: Path):
     _write_fixture_novel(tmp_path)
     build_rag_index(tmp_path)
@@ -241,6 +331,34 @@ class FakeBM25:
     def get_scores(self, query_tokens):
         query = set(query_tokens)
         return [sum(1 for token in document if token in query) for document in self.corpus]
+
+
+class FakeReranker:
+    def __init__(self, scores):
+        self.scores = scores
+        self.pairs = []
+
+    def predict(self, pairs):
+        self.pairs = pairs
+        return self.scores
+
+
+class DescendingReranker:
+    def predict(self, pairs):
+        return list(range(len(pairs)))
+
+
+def _context(id: str, chapter_number: int, text: str):
+    from novel_memory.rag import RetrievedContext
+
+    return RetrievedContext(
+        id=id,
+        source_type="chapter",
+        chapter_number=chapter_number,
+        chapter_title=f"Chapter {chapter_number}",
+        text=text,
+        score=0.0,
+    )
 
 
 def _write_fixture_novel(base_dir: Path) -> None:

@@ -4,6 +4,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
@@ -20,6 +21,9 @@ BM25_INDEX_PATH = Path("indexes") / "bm25.json"
 EMBEDDING_INDEX_VERSION = 1
 EMBEDDING_INDEX_PATH = Path("indexes") / "embeddings.json"
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANK_CANDIDATE_COUNT = 10
+RERANK_RESULT_COUNT = 3
 
 
 @dataclass(frozen=True)
@@ -331,8 +335,9 @@ def answer_question(
     answerer: StoryAnswerer,
     top_k: int = 5,
     retrieval_mode: str = "tfidf",
+    rerank: bool = False,
 ) -> dict[str, Any]:
-    contexts = retrieve_story_context(base_dir, question, top_k=top_k, retrieval_mode=retrieval_mode)
+    contexts = retrieve_story_context(base_dir, question, top_k=top_k, retrieval_mode=retrieval_mode, rerank=rerank)
     if not contexts:
         return {
             "answer": "I do not have enough stored context to answer that.",
@@ -355,7 +360,18 @@ def retrieve_story_context(
     question: str,
     top_k: int = 5,
     retrieval_mode: str = "tfidf",
+    rerank: bool = False,
 ) -> list[RetrievedContext]:
+    if rerank:
+        contexts = retrieve_story_context(
+            base_dir,
+            question,
+            top_k=RERANK_CANDIDATE_COUNT,
+            retrieval_mode=retrieval_mode,
+            rerank=False,
+        )
+        return rerank_contexts(question, contexts, top_k=RERANK_RESULT_COUNT)
+
     if retrieval_mode == "tfidf":
         return retrieve_context(base_dir, question, top_k=top_k)
     if retrieval_mode == "bm25":
@@ -365,6 +381,27 @@ def retrieve_story_context(
     if retrieval_mode == "hybrid":
         return retrieve_hybrid_context(base_dir, question, top_k=top_k)
     raise ValueError(f"Unknown retrieval mode: {retrieval_mode}")
+
+
+def rerank_contexts(question: str, contexts: list[RetrievedContext], top_k: int = RERANK_RESULT_COUNT) -> list[RetrievedContext]:
+    if not contexts or not question.strip():
+        return []
+
+    model = _load_reranker_model()
+    scores = model.predict([(question, context.text) for context in contexts])
+    reranked = [
+        RetrievedContext(
+            id=context.id,
+            source_type=context.source_type,
+            chapter_number=context.chapter_number,
+            chapter_title=context.chapter_title,
+            text=context.text,
+            score=float(score),
+        )
+        for context, score in zip(contexts, scores)
+    ]
+    reranked.sort(key=lambda item: (-item.score, item.chapter_number, item.id))
+    return reranked[:top_k]
 
 
 def build_answer_prompt(question: str, contexts: list[RetrievedContext]) -> str:
@@ -605,6 +642,18 @@ def _load_embedding_model() -> Any:
         ) from exc
 
     return SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
+
+
+@lru_cache(maxsize=1)
+def _load_reranker_model() -> Any:
+    try:
+        from sentence_transformers import CrossEncoder
+    except ImportError as exc:
+        raise RuntimeError(
+            "sentence-transformers is not installed. Install the environment from requirements.txt first."
+        ) from exc
+
+    return CrossEncoder(RERANKER_MODEL_NAME, device="cpu")
 
 
 def _load_bm25_okapi() -> Any:
