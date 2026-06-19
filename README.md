@@ -17,6 +17,7 @@ hundreds or thousands of chapters?
 - Build character memory timelines from chapter summaries.
 - Query what is known about a character up to a selected chapter.
 - Build a local RAG index from summaries, character memory, and chapter chunks.
+- Build a semantic embedding index with `sentence-transformers/all-MiniLM-L6-v2`.
 - Ask story questions and get answers with chapter references.
 - Use either the Streamlit UI or the `python -m novel_memory` CLI.
 
@@ -40,7 +41,8 @@ LoreLedger keeps each processing step explicit and reusable:
 1. Scrape chapters from RoyalRoad into `novels_extracted/<novel_slug>/chapters/`.
 2. Summarize chapters into JSON files under `summaries/`.
 3. Extract character updates from summaries and merge them into `characters/`.
-4. Build searchable local context in `indexes/rag.json`.
+4. Build searchable local context in `indexes/rag.json`, with an optional
+   semantic index in `indexes/embeddings.json`.
 5. Answer questions using retrieved story context and chapter references.
 
 Raw chapter text is kept separate from generated summaries so the memory can be
@@ -86,18 +88,26 @@ The Streamlit app has four main tabs:
 - `Scrape`: add chapters from a RoyalRoad starting chapter URL.
 - `Novel`: preview chapters, summarize one chapter, or summarize a chapter range.
 - `Character Memory`: inspect a character timeline through a selected chapter.
-- `Ask Story`: build the RAG index, retrieve context, and answer story questions.
+- `Ask Story`: choose TF-IDF or semantic retrieval, build the selected index,
+  retrieve context, and answer story questions.
 
 Current Streamlit local model defaults are tuned for the current local setup:
 
 ```text
-Context size: 8192
-GPU layers: 18
+Context size: 16896
+GPU layers: 20
 Temperature: 0.2
 ```
 
 You can change the model repo, GGUF file pattern, context size, GPU layers, and
 temperature from the sidebar before summarizing or asking questions.
+
+Set GPU layers to `-1` to ask llama.cpp to offload every model layer to the GPU.
+On a 4 GB GPU, a 7B Q4 model may not have enough VRAM for all layers plus the
+KV cache. Start with a context size of `4096` to `8192`, then increase GPU layers
+until the model runs reliably. A smaller context reduces KV-cache memory and can
+improve performance when memory pressure is the bottleneck, but it does not make
+short prompts inherently faster.
 
 ## CLI Usage
 
@@ -156,6 +166,7 @@ novels_extracted/<novel_slug>/
     arn.json
   indexes/
     characters.json
+    embeddings.json
     rag.json
     summarization_job.json
 ```
