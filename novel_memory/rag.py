@@ -15,6 +15,8 @@ from .summarizer import chapter_summary_to_str
 
 RAG_INDEX_VERSION = 1
 RAG_INDEX_PATH = Path("indexes") / "rag.json"
+BM25_INDEX_VERSION = 1
+BM25_INDEX_PATH = Path("indexes") / "bm25.json"
 EMBEDDING_INDEX_VERSION = 1
 EMBEDDING_INDEX_PATH = Path("indexes") / "embeddings.json"
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -147,6 +149,30 @@ def build_embedding_index(base_dir: Path, force: bool = False) -> Path:
     return index_path
 
 
+def build_bm25_index(base_dir: Path, force: bool = False) -> Path:
+    ensure_novel_dirs(base_dir)
+    index_path = base_dir / BM25_INDEX_PATH
+    if index_path.exists() and not force:
+        return index_path
+
+    documents = [
+        {
+            **document,
+            "tokens": _tokenize(document.get("text", "")),
+        }
+        for document in _rag_documents(base_dir)
+    ]
+
+    write_json(
+        index_path,
+        {
+            "version": BM25_INDEX_VERSION,
+            "documents": documents,
+        },
+    )
+    return index_path
+
+
 def retrieve_context(base_dir: Path, question: str, top_k: int = 5) -> list[RetrievedContext]:
     index_path = base_dir / RAG_INDEX_PATH
     if not index_path.exists():
@@ -161,6 +187,40 @@ def retrieve_context(base_dir: Path, question: str, top_k: int = 5) -> list[Retr
     for document in index.get("documents", []):
         score = _cosine_similarity(query_vector, _term_vector(document.get("text", "")))
         score += _recency_boost(question, document)
+        if score <= 0:
+            continue
+        contexts.append(
+            RetrievedContext(
+                id=document["id"],
+                source_type=document["source_type"],
+                chapter_number=int(document["chapter_number"]),
+                chapter_title=document["chapter_title"],
+                text=document["text"],
+                score=score,
+            )
+        )
+
+    contexts.sort(key=lambda item: (-item.score, item.chapter_number, item.id))
+    return contexts[:top_k]
+
+
+def retrieve_bm25_context(base_dir: Path, question: str, top_k: int = 5) -> list[RetrievedContext]:
+    index_path = base_dir / BM25_INDEX_PATH
+    if not index_path.exists():
+        build_bm25_index(base_dir)
+
+    index = read_json(index_path)
+    documents = index.get("documents", [])
+    query_tokens = _tokenize(question)
+    if not documents or not query_tokens:
+        return []
+
+    bm25 = _load_bm25_okapi()([document.get("tokens", []) for document in documents])
+    scores = bm25.get_scores(query_tokens)
+
+    contexts = []
+    for document, score in zip(documents, scores):
+        score = float(score)
         if score <= 0:
             continue
         contexts.append(
@@ -252,6 +312,8 @@ def retrieve_story_context(
 ) -> list[RetrievedContext]:
     if retrieval_mode == "tfidf":
         return retrieve_context(base_dir, question, top_k=top_k)
+    if retrieval_mode == "bm25":
+        return retrieve_bm25_context(base_dir, question, top_k=top_k)
     if retrieval_mode == "semantic":
         return retrieve_embedding_context(base_dir, question, top_k=top_k)
     raise ValueError(f"Unknown retrieval mode: {retrieval_mode}")
@@ -456,6 +518,15 @@ def _load_embedding_model() -> Any:
         ) from exc
 
     return SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
+
+
+def _load_bm25_okapi() -> Any:
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError as exc:
+        raise RuntimeError("rank_bm25 is not installed. Install the environment from requirements.txt first.") from exc
+
+    return BM25Okapi
 
 
 def _recency_boost(question: str, document: dict[str, Any]) -> float:

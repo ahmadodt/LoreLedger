@@ -14,8 +14,10 @@ from novel_memory.rag import (
     FakeStoryAnswerer,
     LlamaCppStoryAnswerer,
     answer_question,
+    build_bm25_index,
     build_embedding_index,
     build_rag_index,
+    retrieve_bm25_context,
     retrieve_embedding_context,
     retrieve_context,
 )
@@ -570,11 +572,16 @@ with tabs[3]:
             st.subheader("Ask a question")
             retrieval_label = st.radio(
                 "Retrieval mode",
-                ["TF-IDF", "Semantic (Embeddings)"],
+                ["TF-IDF", "BM25", "Semantic (Embeddings)"],
                 horizontal=True,
             )
-            retrieval_mode = "semantic" if retrieval_label == "Semantic (Embeddings)" else "tfidf"
-            index_path = base_dir / "indexes" / ("embeddings.json" if retrieval_mode == "semantic" else "rag.json")
+            retrieval_modes = {
+                "TF-IDF": ("tfidf", "rag.json"),
+                "BM25": ("bm25", "bm25.json"),
+                "Semantic (Embeddings)": ("semantic", "embeddings.json"),
+            }
+            retrieval_mode, index_filename = retrieval_modes[retrieval_label]
+            index_path = base_dir / "indexes" / index_filename
             question = st.text_input("Question", placeholder="Who is Arn?")
             top_k = st.slider(
                 "Retrieved context count",
@@ -590,6 +597,8 @@ with tabs[3]:
                     try:
                         if retrieval_mode == "semantic":
                             path = build_embedding_index(base_dir, force=True)
+                        elif retrieval_mode == "bm25":
+                            path = build_bm25_index(base_dir, force=True)
                         else:
                             path = build_rag_index(base_dir, force=True)
                         st.success(f"Saved {path.name}.")
@@ -607,6 +616,8 @@ with tabs[3]:
                         with st.spinner("Retrieving context and answering..."):
                             if retrieval_mode == "semantic":
                                 build_embedding_index(base_dir)
+                            elif retrieval_mode == "bm25":
+                                build_bm25_index(base_dir)
                             else:
                                 build_rag_index(base_dir)
                             answerer = build_story_answerer(summarizer_config)
@@ -639,6 +650,8 @@ with tabs[3]:
                     contexts = []
                 elif retrieval_mode == "semantic":
                     contexts = retrieve_embedding_context(base_dir, preview_question, top_k=3)
+                elif retrieval_mode == "bm25":
+                    contexts = retrieve_bm25_context(base_dir, preview_question, top_k=3)
                 else:
                     contexts = retrieve_context(base_dir, preview_question, top_k=3)
                 for context in contexts:

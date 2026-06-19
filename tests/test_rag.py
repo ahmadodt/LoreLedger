@@ -5,12 +5,15 @@ from types import SimpleNamespace
 from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
 from novel_memory.rag import (
+    BM25_INDEX_VERSION,
     EMBEDDING_MODEL_NAME,
     FakeStoryAnswerer,
     LlamaCppStoryAnswerer,
     answer_question,
+    build_bm25_index,
     build_embedding_index,
     build_rag_index,
+    retrieve_bm25_context,
     retrieve_embedding_context,
     retrieve_context,
 )
@@ -59,6 +62,42 @@ def test_build_rag_index_includes_structured_event_details(tmp_path: Path):
     assert "Type: revelation" in text
     assert "Participants: Mira, Arn" in text
     assert "Evidence: Mira warns him about the patron." in text
+
+
+def test_build_bm25_index_uses_existing_rag_documents(tmp_path: Path):
+    _write_fixture_novel(tmp_path)
+
+    path = build_bm25_index(tmp_path)
+
+    index = read_json(path)
+    source_types = {document["source_type"] for document in index["documents"]}
+    assert index["version"] == BM25_INDEX_VERSION
+    assert source_types == {"summary", "character", "chapter"}
+    assert all(isinstance(document["tokens"], list) for document in index["documents"])
+    assert any("patron" in document["tokens"] for document in index["documents"])
+
+
+def test_retrieve_bm25_context_returns_relevant_chapter_context(tmp_path: Path, monkeypatch):
+    _write_fixture_novel(tmp_path)
+    monkeypatch.setattr("novel_memory.rag._load_bm25_okapi", lambda: FakeBM25)
+    build_bm25_index(tmp_path)
+
+    contexts = retrieve_bm25_context(tmp_path, "Who warned Arn about the patron?", top_k=2)
+
+    assert contexts
+    assert contexts[0].chapter_number == 2
+    assert "patron" in contexts[0].text
+    assert contexts[0].reference == "Chapter 2 - The Healer"
+
+
+def test_retrieve_bm25_context_returns_empty_for_empty_index(tmp_path: Path, monkeypatch):
+    ensure_novel_dirs(tmp_path)
+    monkeypatch.setattr("novel_memory.rag._load_bm25_okapi", lambda: FakeBM25)
+    build_bm25_index(tmp_path)
+
+    contexts = retrieve_bm25_context(tmp_path, "Who is Nobody?")
+
+    assert contexts == []
 
 
 def test_build_embedding_index_uses_existing_rag_documents(tmp_path: Path, monkeypatch):
@@ -138,6 +177,15 @@ class FakeEmbeddingModel:
 
     def _vector(self, value: str) -> list[float]:
         return [1.0, 0.0] if "mira" in value.lower() else [0.0, 1.0]
+
+
+class FakeBM25:
+    def __init__(self, corpus):
+        self.corpus = corpus
+
+    def get_scores(self, query_tokens):
+        query = set(query_tokens)
+        return [sum(1 for token in document if token in query) for document in self.corpus]
 
 
 def _write_fixture_novel(base_dir: Path) -> None:
