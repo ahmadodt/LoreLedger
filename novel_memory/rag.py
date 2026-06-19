@@ -5,7 +5,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 from .io import read_json, write_json
 from .paths import ensure_novel_dirs
@@ -15,6 +15,9 @@ from .summarizer import chapter_summary_to_str
 
 RAG_INDEX_VERSION = 1
 RAG_INDEX_PATH = Path("indexes") / "rag.json"
+EMBEDDING_INDEX_VERSION = 1
+EMBEDDING_INDEX_PATH = Path("indexes") / "embeddings.json"
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 @dataclass(frozen=True)
@@ -94,15 +97,51 @@ def build_rag_index(base_dir: Path, force: bool = False) -> Path:
     if index_path.exists() and not force:
         return index_path
 
-    documents = _chapter_summary_documents(base_dir)
-    documents.extend(_character_timeline_documents(base_dir))
-    documents.extend(_chapter_chunk_documents(base_dir))
+    documents = _rag_documents(base_dir)
 
     write_json(
         index_path,
         {
             "version": RAG_INDEX_VERSION,
             "documents": documents,
+        },
+    )
+    return index_path
+
+
+def build_embedding_index(base_dir: Path, force: bool = False) -> Path:
+    ensure_novel_dirs(base_dir)
+    index_path = base_dir / EMBEDDING_INDEX_PATH
+    if index_path.exists() and not force:
+        return index_path
+
+    documents = _rag_documents(base_dir)
+    vectors: list[list[float]] = []
+    if documents:
+        model = _load_embedding_model()
+        vectors = [
+            _embedding_to_list(vector)
+            for vector in model.encode(
+                [document["text"] for document in documents],
+                convert_to_numpy=True,
+                normalize_embeddings=False,
+            )
+        ]
+
+    indexed_documents = [
+        {
+            **document,
+            "embedding": vector,
+        }
+        for document, vector in zip(documents, vectors)
+    ]
+
+    write_json(
+        index_path,
+        {
+            "version": EMBEDDING_INDEX_VERSION,
+            "model": EMBEDDING_MODEL_NAME,
+            "documents": indexed_documents,
         },
     )
     return index_path
@@ -139,13 +178,55 @@ def retrieve_context(base_dir: Path, question: str, top_k: int = 5) -> list[Retr
     return contexts[:top_k]
 
 
+def retrieve_embedding_context(base_dir: Path, question: str, top_k: int = 5) -> list[RetrievedContext]:
+    index_path = base_dir / EMBEDDING_INDEX_PATH
+    if not index_path.exists():
+        build_embedding_index(base_dir)
+
+    index = read_json(index_path)
+    documents = index.get("documents", [])
+    if not documents or not question.strip():
+        return []
+
+    model = _load_embedding_model()
+    query_vector = _embedding_to_list(
+        model.encode(
+            question,
+            convert_to_numpy=True,
+            normalize_embeddings=False,
+        )
+    )
+    if not query_vector:
+        return []
+
+    contexts = []
+    for document in documents:
+        score = _cosine_similarity_values(query_vector, document.get("embedding", []))
+        if score <= 0:
+            continue
+        contexts.append(
+            RetrievedContext(
+                id=document["id"],
+                source_type=document["source_type"],
+                chapter_number=int(document["chapter_number"]),
+                chapter_title=document["chapter_title"],
+                text=document["text"],
+                score=score,
+            )
+        )
+
+    contexts.sort(key=lambda item: (-item.score, item.chapter_number, item.id))
+    return contexts[:top_k]
+
+
 def answer_question(
     base_dir: Path,
     question: str,
     answerer: StoryAnswerer,
     top_k: int = 5,
+    retrieval_mode: str = "tfidf",
 ) -> dict[str, Any]:
-    contexts = retrieve_context(base_dir, question, top_k=top_k)
+    contexts = retrieve_story_context(base_dir, question, top_k=top_k, retrieval_mode=retrieval_mode)
     if not contexts:
         return {
             "answer": "I do not have enough stored context to answer that.",
@@ -161,6 +242,19 @@ def answer_question(
         "references": references,
         "contexts": contexts,
     }
+
+
+def retrieve_story_context(
+    base_dir: Path,
+    question: str,
+    top_k: int = 5,
+    retrieval_mode: str = "tfidf",
+) -> list[RetrievedContext]:
+    if retrieval_mode == "tfidf":
+        return retrieve_context(base_dir, question, top_k=top_k)
+    if retrieval_mode == "semantic":
+        return retrieve_embedding_context(base_dir, question, top_k=top_k)
+    raise ValueError(f"Unknown retrieval mode: {retrieval_mode}")
 
 
 def build_answer_prompt(question: str, contexts: list[RetrievedContext]) -> str:
@@ -181,6 +275,13 @@ Retrieved context:
 
 Answer:
 """
+
+
+def _rag_documents(base_dir: Path) -> list[dict[str, Any]]:
+    documents = _chapter_summary_documents(base_dir)
+    documents.extend(_character_timeline_documents(base_dir))
+    documents.extend(_chapter_chunk_documents(base_dir))
+    return documents
 
 
 def _chapter_summary_documents(base_dir: Path) -> list[dict[str, Any]]:
@@ -327,6 +428,34 @@ def _cosine_similarity(left: Counter[str], right: Counter[str]) -> float:
     if left_norm == 0 or right_norm == 0:
         return 0.0
     return dot / (left_norm * right_norm)
+
+
+def _cosine_similarity_values(left: Sequence[float], right: Sequence[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(left_value * right_value for left_value, right_value in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _embedding_to_list(vector: Any) -> list[float]:
+    if hasattr(vector, "tolist"):
+        vector = vector.tolist()
+    return [float(value) for value in vector]
+
+
+def _load_embedding_model() -> Any:
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise RuntimeError(
+            "sentence-transformers is not installed. Install the environment from requirements.txt first."
+        ) from exc
+
+    return SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
 
 
 def _recency_boost(question: str, document: dict[str, Any]) -> float:

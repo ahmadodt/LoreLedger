@@ -5,10 +5,13 @@ from types import SimpleNamespace
 from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
 from novel_memory.rag import (
+    EMBEDDING_MODEL_NAME,
     FakeStoryAnswerer,
     LlamaCppStoryAnswerer,
     answer_question,
+    build_embedding_index,
     build_rag_index,
+    retrieve_embedding_context,
     retrieve_context,
 )
 
@@ -58,6 +61,43 @@ def test_build_rag_index_includes_structured_event_details(tmp_path: Path):
     assert "Evidence: Mira warns him about the patron." in text
 
 
+def test_build_embedding_index_uses_existing_rag_documents(tmp_path: Path, monkeypatch):
+    _write_fixture_novel(tmp_path)
+    monkeypatch.setattr("novel_memory.rag._load_embedding_model", lambda: FakeEmbeddingModel())
+
+    path = build_embedding_index(tmp_path)
+
+    index = read_json(path)
+    source_types = {document["source_type"] for document in index["documents"]}
+    assert index["model"] == EMBEDDING_MODEL_NAME
+    assert source_types == {"summary", "character", "chapter"}
+    assert all(isinstance(document["embedding"], list) for document in index["documents"])
+    assert all(document["embedding"] for document in index["documents"])
+
+
+def test_retrieve_embedding_context_returns_relevant_chapter_context(tmp_path: Path, monkeypatch):
+    _write_fixture_novel(tmp_path)
+    monkeypatch.setattr("novel_memory.rag._load_embedding_model", lambda: FakeEmbeddingModel())
+    build_embedding_index(tmp_path)
+
+    contexts = retrieve_embedding_context(tmp_path, "Where is Mira?", top_k=2)
+
+    assert contexts
+    assert contexts[0].chapter_number == 2
+    assert "Mira" in contexts[0].text
+    assert contexts[0].reference == "Chapter 2 - The Healer"
+
+
+def test_retrieve_embedding_context_returns_empty_for_empty_index(tmp_path: Path, monkeypatch):
+    ensure_novel_dirs(tmp_path)
+    monkeypatch.setattr("novel_memory.rag._load_embedding_model", lambda: FakeEmbeddingModel())
+    build_embedding_index(tmp_path)
+
+    contexts = retrieve_embedding_context(tmp_path, "Who is Nobody?")
+
+    assert contexts == []
+
+
 def test_retrieve_context_returns_relevant_character_context(tmp_path: Path):
     _write_fixture_novel(tmp_path)
     build_rag_index(tmp_path)
@@ -88,6 +128,16 @@ def test_answer_question_reports_missing_context(tmp_path: Path):
 
     assert result["answer"] == "I do not have enough stored context to answer that."
     assert result["references"] == []
+
+
+class FakeEmbeddingModel:
+    def encode(self, values, **_kwargs):
+        if isinstance(values, str):
+            return self._vector(values)
+        return [self._vector(value) for value in values]
+
+    def _vector(self, value: str) -> list[float]:
+        return [1.0, 0.0] if "mira" in value.lower() else [0.0, 1.0]
 
 
 def _write_fixture_novel(base_dir: Path) -> None:
