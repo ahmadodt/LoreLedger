@@ -15,7 +15,9 @@ from novel_memory.rag import (
     build_rag_index,
     retrieve_bm25_context,
     retrieve_embedding_context,
+    retrieve_hybrid_context,
     retrieve_context,
+    _normalize_scores,
 )
 
 
@@ -135,6 +137,59 @@ def test_retrieve_embedding_context_returns_empty_for_empty_index(tmp_path: Path
     contexts = retrieve_embedding_context(tmp_path, "Who is Nobody?")
 
     assert contexts == []
+
+
+def test_retrieve_hybrid_context_combines_normalized_scores(tmp_path: Path, monkeypatch):
+    _write_fixture_novel(tmp_path)
+    build_bm25_index(tmp_path)
+    monkeypatch.setattr("novel_memory.rag._load_embedding_model", lambda: FakeEmbeddingModel())
+    build_embedding_index(tmp_path)
+    monkeypatch.setattr(
+        "novel_memory.rag._bm25_scores",
+        lambda _documents, _query_tokens: {
+            "summary:0001": 0.0,
+            "summary:0002": 10.0,
+            "character:mira:0002": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        "novel_memory.rag._semantic_scores",
+        lambda _documents, _question: {
+            "summary:0001": 1.0,
+            "summary:0002": 0.0,
+            "character:mira:0002": 1.0,
+        },
+    )
+
+    contexts = retrieve_hybrid_context(tmp_path, "Mira patron", top_k=3)
+
+    assert contexts[0].id == "character:mira:0002"
+    assert contexts[0].score == 0.75
+    assert {context.id: context.score for context in contexts}["summary:0001"] == 0.5
+    assert {context.id: context.score for context in contexts}["summary:0002"] == 0.5
+
+
+def test_retrieve_hybrid_context_returns_relevant_chapter_context(tmp_path: Path, monkeypatch):
+    _write_fixture_novel(tmp_path)
+    monkeypatch.setattr("novel_memory.rag._load_bm25_okapi", lambda: FakeBM25)
+    monkeypatch.setattr("novel_memory.rag._load_embedding_model", lambda: FakeEmbeddingModel())
+    build_bm25_index(tmp_path)
+    build_embedding_index(tmp_path)
+
+    contexts = retrieve_hybrid_context(tmp_path, "Where is Mira?", top_k=2)
+
+    assert contexts
+    assert contexts[0].chapter_number == 2
+    assert "Mira" in contexts[0].text
+    assert contexts[0].reference == "Chapter 2 - The Healer"
+
+
+def test_normalize_scores_uses_zero_to_one_range_and_handles_equal_scores():
+    normalized = _normalize_scores({"low": 2.0, "mid": 4.0, "high": 6.0})
+
+    assert normalized == {"low": 0.0, "mid": 0.5, "high": 1.0}
+    assert _normalize_scores({"left": 3.0, "right": 3.0}) == {"left": 1.0, "right": 1.0}
+    assert _normalize_scores({"left": 0.0, "right": 0.0}) == {"left": 0.0, "right": 0.0}
 
 
 def test_retrieve_context_returns_relevant_character_context(tmp_path: Path):

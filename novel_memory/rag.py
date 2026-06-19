@@ -238,6 +238,52 @@ def retrieve_bm25_context(base_dir: Path, question: str, top_k: int = 5) -> list
     return contexts[:top_k]
 
 
+def retrieve_hybrid_context(base_dir: Path, question: str, top_k: int = 5) -> list[RetrievedContext]:
+    bm25_path = base_dir / BM25_INDEX_PATH
+    if not bm25_path.exists():
+        build_bm25_index(base_dir)
+
+    embedding_path = base_dir / EMBEDDING_INDEX_PATH
+    if not embedding_path.exists():
+        build_embedding_index(base_dir)
+
+    bm25_index = read_json(bm25_path)
+    embedding_index = read_json(embedding_path)
+    bm25_documents = bm25_index.get("documents", [])
+    embedding_documents = embedding_index.get("documents", [])
+    query_tokens = _tokenize(question)
+    if not bm25_documents or not embedding_documents or not query_tokens or not question.strip():
+        return []
+
+    bm25_scores = _bm25_scores(bm25_documents, query_tokens)
+    semantic_scores = _semantic_scores(embedding_documents, question)
+    normalized_bm25 = _normalize_scores(bm25_scores)
+    normalized_semantic = _normalize_scores(semantic_scores)
+
+    documents = {document["id"]: document for document in bm25_documents}
+    documents.update({document["id"]: document for document in embedding_documents})
+    scored_contexts = []
+    for document_id, document in documents.items():
+        score = (0.5 * normalized_bm25.get(document_id, 0.0)) + (
+            0.5 * normalized_semantic.get(document_id, 0.0)
+        )
+        if score <= 0:
+            continue
+        scored_contexts.append(
+            RetrievedContext(
+                id=document["id"],
+                source_type=document["source_type"],
+                chapter_number=int(document["chapter_number"]),
+                chapter_title=document["chapter_title"],
+                text=document["text"],
+                score=score,
+            )
+        )
+
+    scored_contexts.sort(key=lambda item: (-item.score, item.chapter_number, item.id))
+    return scored_contexts[:top_k]
+
+
 def retrieve_embedding_context(base_dir: Path, question: str, top_k: int = 5) -> list[RetrievedContext]:
     index_path = base_dir / EMBEDDING_INDEX_PATH
     if not index_path.exists():
@@ -316,6 +362,8 @@ def retrieve_story_context(
         return retrieve_bm25_context(base_dir, question, top_k=top_k)
     if retrieval_mode == "semantic":
         return retrieve_embedding_context(base_dir, question, top_k=top_k)
+    if retrieval_mode == "hybrid":
+        return retrieve_hybrid_context(base_dir, question, top_k=top_k)
     raise ValueError(f"Unknown retrieval mode: {retrieval_mode}")
 
 
@@ -501,6 +549,45 @@ def _cosine_similarity_values(left: Sequence[float], right: Sequence[float]) -> 
     if left_norm == 0 or right_norm == 0:
         return 0.0
     return dot / (left_norm * right_norm)
+
+
+def _bm25_scores(documents: list[dict[str, Any]], query_tokens: list[str]) -> dict[str, float]:
+    bm25 = _load_bm25_okapi()([document.get("tokens", []) for document in documents])
+    return {
+        document["id"]: float(score)
+        for document, score in zip(documents, bm25.get_scores(query_tokens))
+    }
+
+
+def _semantic_scores(documents: list[dict[str, Any]], question: str) -> dict[str, float]:
+    model = _load_embedding_model()
+    query_vector = _embedding_to_list(
+        model.encode(
+            question,
+            convert_to_numpy=True,
+            normalize_embeddings=False,
+        )
+    )
+    if not query_vector:
+        return {}
+    return {
+        document["id"]: _cosine_similarity_values(query_vector, document.get("embedding", []))
+        for document in documents
+    }
+
+
+def _normalize_scores(scores: dict[str, float]) -> dict[str, float]:
+    if not scores:
+        return {}
+    values = list(scores.values())
+    min_score = min(values)
+    max_score = max(values)
+    if min_score == max_score:
+        return {key: 1.0 if value > 0 else 0.0 for key, value in scores.items()}
+    return {
+        key: (value - min_score) / (max_score - min_score)
+        for key, value in scores.items()
+    }
 
 
 def _embedding_to_list(vector: Any) -> list[float]:

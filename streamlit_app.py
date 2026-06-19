@@ -19,6 +19,7 @@ from novel_memory.rag import (
     build_rag_index,
     retrieve_bm25_context,
     retrieve_embedding_context,
+    retrieve_hybrid_context,
     retrieve_context,
 )
 from novel_memory.scraper import iter_chapter_files, scrape_royalroad
@@ -572,16 +573,24 @@ with tabs[3]:
             st.subheader("Ask a question")
             retrieval_label = st.radio(
                 "Retrieval mode",
-                ["TF-IDF", "BM25", "Semantic (Embeddings)"],
+                ["TF-IDF", "BM25", "Semantic (Embeddings)", "Hybrid"],
                 horizontal=True,
             )
             retrieval_modes = {
                 "TF-IDF": ("tfidf", "rag.json"),
                 "BM25": ("bm25", "bm25.json"),
                 "Semantic (Embeddings)": ("semantic", "embeddings.json"),
+                "Hybrid": ("hybrid", "bm25.json"),
             }
             retrieval_mode, index_filename = retrieval_modes[retrieval_label]
             index_path = base_dir / "indexes" / index_filename
+            index_exists = (
+                index_path.exists()
+                and (
+                    retrieval_mode != "hybrid"
+                    or (base_dir / "indexes" / "embeddings.json").exists()
+                )
+            )
             question = st.text_input("Question", placeholder="Who is Arn?")
             top_k = st.slider(
                 "Retrieved context count",
@@ -596,6 +605,9 @@ with tabs[3]:
                 if st.button("Build RAG index", use_container_width=True):
                     try:
                         if retrieval_mode == "semantic":
+                            path = build_embedding_index(base_dir, force=True)
+                        elif retrieval_mode == "hybrid":
+                            build_bm25_index(base_dir, force=True)
                             path = build_embedding_index(base_dir, force=True)
                         elif retrieval_mode == "bm25":
                             path = build_bm25_index(base_dir, force=True)
@@ -615,6 +627,9 @@ with tabs[3]:
                     try:
                         with st.spinner("Retrieving context and answering..."):
                             if retrieval_mode == "semantic":
+                                build_embedding_index(base_dir)
+                            elif retrieval_mode == "hybrid":
+                                build_bm25_index(base_dir)
                                 build_embedding_index(base_dir)
                             elif retrieval_mode == "bm25":
                                 build_bm25_index(base_dir)
@@ -639,17 +654,19 @@ with tabs[3]:
 
         with right:
             st.subheader("Retrieved context")
-            if index_path.exists():
+            if index_exists:
                 st.success("RAG index exists.")
             else:
                 st.warning("No RAG index yet.")
 
             preview_question = question.strip() if question.strip() else "Who is the main character?"
             try:
-                if not index_path.exists():
+                if not index_exists:
                     contexts = []
                 elif retrieval_mode == "semantic":
                     contexts = retrieve_embedding_context(base_dir, preview_question, top_k=3)
+                elif retrieval_mode == "hybrid":
+                    contexts = retrieve_hybrid_context(base_dir, preview_question, top_k=3)
                 elif retrieval_mode == "bm25":
                     contexts = retrieve_bm25_context(base_dir, preview_question, top_k=3)
                 else:
