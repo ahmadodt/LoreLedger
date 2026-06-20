@@ -6,6 +6,7 @@ from typing import Any
 
 import streamlit as st
 
+from novel_memory.agent import AgentConfig, ReActAgent, SimpleRAGAgent
 from novel_memory.env import load_project_env
 from novel_memory.io import read_json
 from novel_memory.memory import character_summary_until
@@ -13,7 +14,6 @@ from novel_memory.paths import OUTPUT_ROOT, ensure_novel_dirs, novel_dir
 from novel_memory.rag import (
     FakeStoryAnswerer,
     LlamaCppStoryAnswerer,
-    answer_question,
     build_bm25_index,
     build_embedding_index,
     build_rag_index,
@@ -252,6 +252,23 @@ def build_story_answerer(config: dict[str, Any]):
         gpu_layers=config["gpu_layers"],
         temperature=config["temperature"],
     )
+
+
+AGENT_MODES = {
+    "Simple RAG": SimpleRAGAgent,
+    "ReAct": ReActAgent,
+}
+
+
+def render_agent_steps(steps: list[Any]) -> str:
+    if not steps:
+        return "_No agent steps yet._"
+    lines = []
+    for index, step in enumerate(steps, start=1):
+        label = step.kind.title()
+        query = f" | Query: `{step.query}`" if step.query else ""
+        lines.append(f"**{index}. {label}**{query}\n\n{step.content}")
+    return "\n\n".join(lines)
 
 
 st.markdown(
@@ -572,6 +589,7 @@ with tabs[3]:
         left, right = st.columns([1.1, 0.9], gap="large")
         with left:
             st.subheader("Ask a question")
+            agent_label = st.selectbox("Agent Mode", list(AGENT_MODES))
             retrieval_label = st.radio(
                 "Retrieval mode",
                 ["TF-IDF", "BM25", "Semantic (Embeddings)", "Hybrid"],
@@ -627,6 +645,8 @@ with tabs[3]:
                     st.error("Enter a question.")
                 else:
                     try:
+                        agent_steps = []
+                        reasoning_placeholder = st.empty()
                         with st.spinner("Retrieving context and answering..."):
                             if retrieval_mode == "semantic":
                                 build_embedding_index(base_dir)
@@ -639,20 +659,31 @@ with tabs[3]:
                                 build_rag_index(base_dir)
                             answerer = build_story_answerer(summarizer_config)
                             try:
-                                result = answer_question(
+                                agent = AGENT_MODES[agent_label](
+                                    AgentConfig(
+                                        retrieval_mode=retrieval_mode,
+                                        rerank=rerank_enabled,
+                                        top_k=10 if rerank_enabled else int(top_k),
+                                    )
+                                )
+                                result = agent.ask(
                                     base_dir,
                                     question.strip(),
                                     answerer,
-                                    top_k=10 if rerank_enabled else int(top_k),
-                                    retrieval_mode=retrieval_mode,
-                                    rerank=rerank_enabled,
+                                    on_step=lambda step: (
+                                        agent_steps.append(step),
+                                        reasoning_placeholder.markdown(render_agent_steps(agent_steps)),
+                                    ),
                                 )
                             finally:
                                 close = getattr(answerer, "close", None)
                                 if callable(close):
                                     close()
-                        st.caption(f"Retrieval: {retrieval_label} | Re-ranking: {'on' if rerank_enabled else 'off'}")
-                        st.write(result["answer"])
+                        reasoning_placeholder.markdown(render_agent_steps(result.steps))
+                        st.caption(
+                            f"Agent: {agent_label} | Retrieval: {retrieval_label} | Re-ranking: {'on' if rerank_enabled else 'off'}"
+                        )
+                        st.write(result.answer)
                     except Exception as exc:
                         st.error(f"Question failed: {exc}")
 

@@ -71,11 +71,19 @@ class LlamaCppStoryAnswerer:
         )
 
     def answer_question(self, question: str, contexts: list[RetrievedContext]) -> str:
+        return self.complete_prompt(build_answer_prompt(question, contexts), stop=["</answer>"])
+
+    def complete_prompt(
+        self,
+        prompt: str,
+        stop: list[str] | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
         result = self._llm(
-            build_answer_prompt(question, contexts),
-            max_tokens=self.max_tokens,
+            prompt,
+            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
             temperature=self.temperature,
-            stop=["</answer>"],
+            stop=stop,
         )
         return str(result["choices"][0]["text"]).strip()
 
