@@ -17,6 +17,7 @@ from .rag import (
 
 
 MAX_REACT_LOOPS = 3
+MAX_PLAN_STEPS = 5
 INSUFFICIENT_CONTEXT_ANSWER = "I do not have enough stored context to answer that."
 
 
@@ -145,6 +146,56 @@ class ReActAgent:
 
 
 @dataclass
+class PlanAndExecuteAgent:
+    config: AgentConfig
+    max_steps: int = MAX_PLAN_STEPS
+
+    def ask(
+        self,
+        base_dir: Path,
+        question: str,
+        answerer: StoryAnswerer,
+        on_step: Callable[[AgentStep], None] | None = None,
+    ) -> AgentResult:
+        steps: list[AgentStep] = []
+        plan = _build_plan(answerer, question, self.max_steps)
+        plan_step = AgentStep(kind="plan", content="\n".join(f"{index}. {item}" for index, item in enumerate(plan, start=1)))
+        steps.append(plan_step)
+        _emit_step(plan_step, on_step)
+
+        accumulated_contexts: list[RetrievedContext] = []
+        seen_context_ids: set[str] = set()
+        for item in plan:
+            act_step = AgentStep(kind="act", content=f"Retrieve context for: {item}", query=item)
+            steps.append(act_step)
+            _emit_step(act_step, on_step)
+
+            contexts = retrieve_story_context(
+                base_dir,
+                item,
+                top_k=self.config.top_k,
+                retrieval_mode=self.config.retrieval_mode,
+                rerank=self.config.rerank,
+            )
+            for context in contexts:
+                if context.id in seen_context_ids:
+                    continue
+                seen_context_ids.add(context.id)
+                accumulated_contexts.append(context)
+
+            observe_step = AgentStep(
+                kind="observe",
+                content=_observation_text(contexts),
+                query=item,
+                contexts=contexts,
+            )
+            steps.append(observe_step)
+            _emit_step(observe_step, on_step)
+
+        return _answer_from_contexts(question, accumulated_contexts, answerer, steps)
+
+
+@dataclass
 class FakeAgent:
     answer: str = "Fake agent answer."
     references: list[str] = field(default_factory=lambda: ["Chapter 1 - Fake"])
@@ -159,6 +210,31 @@ class FakeAgent:
         step = AgentStep(kind="final", content=f"Fake answer for: {question}")
         _emit_step(step, on_step)
         return AgentResult(answer=self.answer, references=list(self.references), contexts=[], steps=[step])
+
+
+@dataclass
+class FakePlanAndExecuteAgent:
+    plan: list[str] = field(default_factory=lambda: ["Find fake context"])
+    answer: str = "Fake plan and execute answer."
+    references: list[str] = field(default_factory=lambda: ["Chapter 1 - Fake"])
+
+    def ask(
+        self,
+        base_dir: Path,
+        question: str,
+        answerer: StoryAnswerer,
+        on_step: Callable[[AgentStep], None] | None = None,
+    ) -> AgentResult:
+        steps = [AgentStep(kind="plan", content="\n".join(self.plan))]
+        _emit_step(steps[-1], on_step)
+        for item in self.plan:
+            steps.append(AgentStep(kind="act", content=f"Retrieve context for: {item}", query=item))
+            _emit_step(steps[-1], on_step)
+            steps.append(AgentStep(kind="observe", content="Fake observation.", query=item))
+            _emit_step(steps[-1], on_step)
+        steps.append(AgentStep(kind="final", content=f"Fake answer for: {question}"))
+        _emit_step(steps[-1], on_step)
+        return AgentResult(answer=self.answer, references=list(self.references), contexts=[], steps=steps)
 
 
 def _answer_from_contexts(
@@ -177,6 +253,72 @@ def _answer_from_contexts(
     answer = _ensure_references(answer, references)
     steps.append(AgentStep(kind="final", content=answer, contexts=contexts))
     return AgentResult(answer=answer, references=references, contexts=contexts, steps=steps)
+
+
+def _build_plan(answerer: StoryAnswerer, question: str, max_steps: int = MAX_PLAN_STEPS) -> list[str]:
+    complete = getattr(answerer, "complete_prompt", None)
+    if not callable(complete):
+        return [question]
+
+    prompt = _build_plan_prompt(question, max_steps)
+    try:
+        text = complete(prompt, stop=None, max_tokens=320)
+    except Exception:
+        return [question]
+
+    plan = _parse_plan(text)
+    if not plan:
+        return [question]
+    return plan[:max_steps]
+
+
+def _parse_plan(text: str) -> list[str]:
+    parsed: Any
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\[.*\]", text, flags=re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+        else:
+            parsed = None
+
+    if isinstance(parsed, list):
+        return _clean_plan_items(parsed)
+    if isinstance(parsed, dict):
+        for key in ("plan", "steps", "queries"):
+            if isinstance(parsed.get(key), list):
+                return _clean_plan_items(parsed[key])
+
+    line_items = []
+    for line in text.splitlines():
+        item = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+        if item and item != line.strip():
+            line_items.append(item)
+    return _clean_plan_items(line_items)
+
+
+def _clean_plan_items(items: list[Any]) -> list[str]:
+    cleaned = []
+    for item in items:
+        value = str(item).strip()
+        if value:
+            cleaned.append(value)
+    return cleaned
+
+
+def _build_plan_prompt(question: str, max_steps: int) -> str:
+    return f"""You are LoreLedger's planning agent.
+
+Create a step-by-step retrieval plan for answering the user's story question.
+Return only a strict JSON array of strings. Do not answer the question.
+Use at most {max_steps} steps.
+
+Question: {question}
+"""
 
 
 def _react_decision(

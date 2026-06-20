@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from novel_memory.agent import AgentConfig, FakeAgent, ReActAgent, SimpleRAGAgent
+from novel_memory.agent import AgentConfig, FakeAgent, FakePlanAndExecuteAgent, PlanAndExecuteAgent, ReActAgent, SimpleRAGAgent
 from novel_memory.rag import RetrievedContext
 
 
@@ -108,6 +108,78 @@ def test_react_agent_reports_missing_context_after_empty_loops(monkeypatch, tmp_
     assert result.references == []
 
 
+def test_plan_and_execute_agent_generates_plan_and_retrieves_each_step(monkeypatch, tmp_path: Path):
+    calls = []
+
+    def fake_retrieve(_base_dir, question, top_k=5, retrieval_mode="tfidf", rerank=False):
+        calls.append((question, top_k, retrieval_mode, rerank))
+        return [
+            _context(
+                f"chapter:000{len(calls)}:001",
+                len(calls),
+                f"Context for {question}",
+            )
+        ]
+
+    monkeypatch.setattr("novel_memory.agent.retrieve_story_context", fake_retrieve)
+    answerer = ScriptedAnswerer(
+        decisions=['["Find who Arn is", "Find Arn relationship with Mira", "Find how it changed"]'],
+        answer="Arn and Mira changed over time.",
+    )
+    steps = []
+    agent = PlanAndExecuteAgent(AgentConfig(retrieval_mode="hybrid", rerank=True, top_k=6))
+
+    result = agent.ask(tmp_path, "How did Arn and Mira change?", answerer, on_step=steps.append)
+
+    assert calls == [
+        ("Find who Arn is", 6, "hybrid", True),
+        ("Find Arn relationship with Mira", 6, "hybrid", True),
+        ("Find how it changed", 6, "hybrid", True),
+    ]
+    assert result.answer.startswith("Arn and Mira changed over time.")
+    assert "Chapter 1 - The Arena" in result.answer
+    assert result.references == ["Chapter 1 - The Arena", "Chapter 2 - The Healer", "Chapter 3 - Chapter 3"]
+    assert [step.kind for step in steps[:4]] == ["plan", "act", "observe", "act"]
+
+
+def test_plan_and_execute_agent_truncates_plan_to_five_steps(monkeypatch, tmp_path: Path):
+    calls = []
+    monkeypatch.setattr(
+        "novel_memory.agent.retrieve_story_context",
+        lambda _base_dir, question, **_kwargs: calls.append(question) or [_context(f"chapter:{len(calls):04d}:001", len(calls), question)],
+    )
+    answerer = ScriptedAnswerer(
+        decisions=['["one", "two", "three", "four", "five", "six"]'],
+        answer="Answer.",
+    )
+
+    result = PlanAndExecuteAgent(AgentConfig()).ask(tmp_path, "Question?", answerer)
+
+    assert calls == ["one", "two", "three", "four", "five"]
+    assert "six" not in result.steps[0].content
+
+
+def test_plan_and_execute_agent_deduplicates_combined_contexts(monkeypatch, tmp_path: Path):
+    shared = _context("chapter:0001:001", 1, "Shared context.")
+
+    def fake_retrieve(_base_dir, question, **_kwargs):
+        if question == "first":
+            return [shared, _context("chapter:0002:001", 2, "Second context.")]
+        return [shared, _context("chapter:0003:001", 3, "Third context.")]
+
+    monkeypatch.setattr("novel_memory.agent.retrieve_story_context", fake_retrieve)
+    answerer = ScriptedAnswerer(decisions=['["first", "second"]'], answer="Combined answer.")
+
+    result = PlanAndExecuteAgent(AgentConfig()).ask(tmp_path, "Question?", answerer)
+
+    assert [context.id for context in result.contexts] == [
+        "chapter:0001:001",
+        "chapter:0002:001",
+        "chapter:0003:001",
+    ]
+    assert result.answer.endswith("- Chapter 3 - Chapter 3")
+
+
 def test_fake_agent_returns_predictable_output(tmp_path: Path):
     result = FakeAgent(answer="Predictable.", references=["Chapter 1 - Test"]).ask(
         tmp_path,
@@ -118,6 +190,20 @@ def test_fake_agent_returns_predictable_output(tmp_path: Path):
     assert result.answer == "Predictable."
     assert result.references == ["Chapter 1 - Test"]
     assert result.steps[0].kind == "final"
+
+
+def test_fake_plan_and_execute_agent_returns_predictable_output(tmp_path: Path):
+    steps = []
+    result = FakePlanAndExecuteAgent(
+        plan=["Find one", "Find two"],
+        answer="Predictable plan answer.",
+        references=["Chapter 1 - Test"],
+    ).ask(tmp_path, "Question?", FakeAnswerer("unused"), on_step=steps.append)
+
+    assert result.answer == "Predictable plan answer."
+    assert result.references == ["Chapter 1 - Test"]
+    assert [step.kind for step in result.steps] == ["plan", "act", "observe", "act", "observe", "final"]
+    assert [step.kind for step in steps] == ["plan", "act", "observe", "act", "observe", "final"]
 
 
 class FakeAnswerer:

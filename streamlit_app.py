@@ -6,7 +6,7 @@ from typing import Any
 
 import streamlit as st
 
-from novel_memory.agent import AgentConfig, ReActAgent, SimpleRAGAgent
+from novel_memory.agent import AgentConfig, PlanAndExecuteAgent, ReActAgent, SimpleRAGAgent
 from novel_memory.env import load_project_env
 from novel_memory.io import read_json
 from novel_memory.memory import character_summary_until
@@ -257,6 +257,7 @@ def build_story_answerer(config: dict[str, Any]):
 AGENT_MODES = {
     "Simple RAG": SimpleRAGAgent,
     "ReAct": ReActAgent,
+    "Plan and Execute": PlanAndExecuteAgent,
 }
 
 
