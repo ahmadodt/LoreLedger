@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from .graph import GRAPH_INDEX_PATH, query_graph
+from .io import read_json
 from .rag import (
     RetrievedContext,
     StoryAnswerer,
@@ -26,6 +28,7 @@ class AgentConfig:
     retrieval_mode: str = "tfidf"
     rerank: bool = False
     top_k: int = 5
+    include_graph: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,11 +129,7 @@ class ReActAgent:
                 retrieval_mode=self.config.retrieval_mode,
                 rerank=self.config.rerank,
             )
-            for context in contexts:
-                if context.id in seen_context_ids:
-                    continue
-                seen_context_ids.add(context.id)
-                accumulated_contexts.append(context)
+            _extend_unique_contexts(accumulated_contexts, seen_context_ids, contexts)
 
             observe_step = AgentStep(
                 kind="observe",
@@ -140,6 +139,9 @@ class ReActAgent:
             )
             steps.append(observe_step)
             _emit_step(observe_step, on_step)
+            if self.config.include_graph:
+                graph_contexts = _query_graph_contexts(base_dir, question, refined_query, steps, on_step)
+                _extend_unique_contexts(accumulated_contexts, seen_context_ids, graph_contexts)
             next_query = refined_query
 
         return _answer_from_contexts(question, accumulated_contexts, answerer, steps)
@@ -177,11 +179,7 @@ class PlanAndExecuteAgent:
                 retrieval_mode=self.config.retrieval_mode,
                 rerank=self.config.rerank,
             )
-            for context in contexts:
-                if context.id in seen_context_ids:
-                    continue
-                seen_context_ids.add(context.id)
-                accumulated_contexts.append(context)
+            _extend_unique_contexts(accumulated_contexts, seen_context_ids, contexts)
 
             observe_step = AgentStep(
                 kind="observe",
@@ -191,6 +189,9 @@ class PlanAndExecuteAgent:
             )
             steps.append(observe_step)
             _emit_step(observe_step, on_step)
+            if self.config.include_graph:
+                graph_contexts = _query_graph_contexts(base_dir, question, item, steps, on_step)
+                _extend_unique_contexts(accumulated_contexts, seen_context_ids, graph_contexts)
 
         return _answer_from_contexts(question, accumulated_contexts, answerer, steps)
 
@@ -253,6 +254,91 @@ def _answer_from_contexts(
     answer = _ensure_references(answer, references)
     steps.append(AgentStep(kind="final", content=answer, contexts=contexts))
     return AgentResult(answer=answer, references=references, contexts=contexts, steps=steps)
+
+
+def _query_graph_contexts(
+    base_dir: Path,
+    question: str,
+    query: str,
+    steps: list[AgentStep],
+    on_step: Callable[[AgentStep], None] | None,
+) -> list[RetrievedContext]:
+    contexts: list[RetrievedContext] = []
+    for name in _candidate_graph_names(base_dir, f"{question} {query}"):
+        act_step = AgentStep(kind="act", content=f"Query relationship graph for: {name}", query=name)
+        steps.append(act_step)
+        _emit_step(act_step, on_step)
+
+        graph_contexts = _graph_contexts(base_dir, name)
+        contexts.extend(graph_contexts)
+        observe_step = AgentStep(
+            kind="observe",
+            content=f"Found {len(graph_contexts)} relationship edge(s).",
+            query=name,
+            contexts=graph_contexts,
+        )
+        steps.append(observe_step)
+        _emit_step(observe_step, on_step)
+    return contexts
+
+
+def _candidate_graph_names(base_dir: Path, text: str) -> list[str]:
+    graph_path = base_dir / GRAPH_INDEX_PATH
+    if not graph_path.exists() or not text.strip():
+        return []
+    graph = read_json(graph_path)
+    matched = []
+    for name in sorted(graph.get("characters", {}), key=len, reverse=True):
+        pattern = rf"(?<!\w){re.escape(str(name))}(?!\w)"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            matched.append(str(name))
+    return matched
+
+
+def _graph_contexts(base_dir: Path, name: str) -> list[RetrievedContext]:
+    contexts = []
+    seen = set()
+    for edge in query_graph(base_dir, name):
+        context = _graph_edge_context(edge)
+        if context.id in seen:
+            continue
+        seen.add(context.id)
+        contexts.append(context)
+    return contexts
+
+
+def _graph_edge_context(edge: dict[str, Any]) -> RetrievedContext:
+    chapter = int(edge.get("chapter", 0))
+    source = str(edge.get("from", "")).strip()
+    target = str(edge.get("to", "")).strip()
+    relation = str(edge.get("relation", "RELATED")).strip()
+    description = str(edge.get("description", "")).strip()
+    evidence = str(edge.get("evidence", "")).strip()
+    text = f"{source} {relation} {target}."
+    if description:
+        text = f"{text} {description}"
+    if evidence:
+        text = f"{text} Evidence: {evidence}"
+    return RetrievedContext(
+        id=f"graph:{chapter}:{source}:{relation}:{target}:{evidence}",
+        source_type="graph",
+        chapter_number=chapter,
+        chapter_title="Graph",
+        text=text,
+        score=1.0,
+    )
+
+
+def _extend_unique_contexts(
+    accumulated_contexts: list[RetrievedContext],
+    seen_context_ids: set[str],
+    contexts: list[RetrievedContext],
+) -> None:
+    for context in contexts:
+        if context.id in seen_context_ids:
+            continue
+        seen_context_ids.add(context.id)
+        accumulated_contexts.append(context)
 
 
 def _build_plan(answerer: StoryAnswerer, question: str, max_steps: int = MAX_PLAN_STEPS) -> list[str]:

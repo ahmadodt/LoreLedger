@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from novel_memory.agent import AgentConfig, FakeAgent, FakePlanAndExecuteAgent, PlanAndExecuteAgent, ReActAgent, SimpleRAGAgent
+from novel_memory.io import write_json
+from novel_memory.paths import ensure_novel_dirs
 from novel_memory.rag import RetrievedContext
 
 
@@ -108,6 +110,31 @@ def test_react_agent_reports_missing_context_after_empty_loops(monkeypatch, tmp_
     assert result.references == []
 
 
+def test_react_agent_queries_graph_when_name_detected(monkeypatch, tmp_path: Path):
+    _write_agent_graph(tmp_path)
+    graph_calls = []
+    monkeypatch.setattr("novel_memory.agent.retrieve_story_context", lambda *_args, **_kwargs: [])
+
+    def fake_query_graph(_base_dir, name):
+        graph_calls.append(name)
+        return [_graph_edge()]
+
+    monkeypatch.setattr("novel_memory.agent.query_graph", fake_query_graph)
+    answerer = ScriptedAnswerer(
+        decisions=[
+            '{"thought": "Find Arn relationships.", "action": "retrieve", "query": "Arn"}',
+            '{"thought": "Graph context is enough.", "action": "answer"}',
+        ],
+        answer="Arn saved Mira.",
+    )
+
+    result = ReActAgent(AgentConfig(include_graph=True)).ask(tmp_path, "What is Arn's relationship with Mira?", answerer)
+
+    assert set(graph_calls) == {"Arn", "Mira"}
+    assert any(context.source_type == "graph" for context in result.contexts)
+    assert "Chapter 7 - Graph" in result.answer
+
+
 def test_plan_and_execute_agent_generates_plan_and_retrieves_each_step(monkeypatch, tmp_path: Path):
     calls = []
 
@@ -140,6 +167,35 @@ def test_plan_and_execute_agent_generates_plan_and_retrieves_each_step(monkeypat
     assert "Chapter 1 - The Arena" in result.answer
     assert result.references == ["Chapter 1 - The Arena", "Chapter 2 - The Healer", "Chapter 3 - Chapter 3"]
     assert [step.kind for step in steps[:4]] == ["plan", "act", "observe", "act"]
+
+
+def test_plan_and_execute_agent_includes_graph_context(monkeypatch, tmp_path: Path):
+    _write_agent_graph(tmp_path)
+    graph_calls = []
+    monkeypatch.setattr("novel_memory.agent.retrieve_story_context", lambda *_args, **_kwargs: [_context("chapter:0001:001", 1, "RAG context.")])
+
+    def fake_query_graph(_base_dir, name):
+        graph_calls.append(name)
+        return [_graph_edge()]
+
+    monkeypatch.setattr("novel_memory.agent.query_graph", fake_query_graph)
+    answerer = ScriptedAnswerer(decisions=['["Find Arn and Mira relationship"]'], answer="Combined answer.")
+
+    result = PlanAndExecuteAgent(AgentConfig(include_graph=True)).ask(tmp_path, "How are Arn and Mira connected?", answerer)
+
+    assert set(graph_calls) == {"Arn", "Mira"}
+    assert [context.source_type for context in result.contexts] == ["chapter", "graph"]
+    assert "Chapter 7 - Graph" in result.answer
+
+
+def test_simple_rag_agent_does_not_query_graph(monkeypatch, tmp_path: Path):
+    _write_agent_graph(tmp_path)
+    monkeypatch.setattr("novel_memory.agent.retrieve_story_context", lambda *_args, **_kwargs: [_context("chapter:0001:001", 1, "RAG context.")])
+    monkeypatch.setattr("novel_memory.agent.query_graph", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("graph should not be queried")))
+
+    result = SimpleRAGAgent(AgentConfig(include_graph=True)).ask(tmp_path, "How are Arn and Mira connected?", FakeAnswerer("RAG answer."))
+
+    assert [context.source_type for context in result.contexts] == ["chapter"]
 
 
 def test_plan_and_execute_agent_truncates_plan_to_five_steps(monkeypatch, tmp_path: Path):
@@ -236,3 +292,28 @@ def _context(id: str, chapter_number: int, text: str) -> RetrievedContext:
         text=text,
         score=1.0,
     )
+
+
+def _write_agent_graph(base_dir: Path) -> None:
+    ensure_novel_dirs(base_dir)
+    write_json(
+        base_dir / "indexes" / "graph.json",
+        {
+            "characters": {
+                "Arn": {"type": "character", "first_seen": 1, "aliases": []},
+                "Mira": {"type": "character", "first_seen": 1, "aliases": []},
+            },
+            "edges": [_graph_edge()],
+        },
+    )
+
+
+def _graph_edge() -> dict:
+    return {
+        "from": "Arn",
+        "to": "Mira",
+        "relation": "SAVED",
+        "chapter": 7,
+        "description": "Arn saved Mira.",
+        "evidence": "He stepped in front of her.",
+    }

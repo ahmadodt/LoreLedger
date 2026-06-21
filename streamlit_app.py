@@ -8,6 +8,7 @@ import streamlit as st
 
 from novel_memory.agent import AgentConfig, PlanAndExecuteAgent, ReActAgent, SimpleRAGAgent
 from novel_memory.env import load_project_env
+from novel_memory.graph import GRAPH_INDEX_PATH, build_graph, query_graph
 from novel_memory.io import read_json
 from novel_memory.memory import character_summary_until
 from novel_memory.paths import OUTPUT_ROOT, ensure_novel_dirs, novel_dir
@@ -106,6 +107,14 @@ def load_characters(base_dir: Path) -> list[dict[str, Any]]:
             }
         )
     return sorted(characters, key=lambda item: item["name"].lower())
+
+
+def load_graph_character_names(base_dir: Path) -> list[str]:
+    graph_path = base_dir / GRAPH_INDEX_PATH
+    if not graph_path.exists():
+        return []
+    graph = read_json(graph_path)
+    return sorted(graph.get("characters", {}), key=str.lower)
 
 
 def chapter_label(chapter: dict[str, Any]) -> str:
@@ -270,6 +279,20 @@ def render_agent_steps(steps: list[Any]) -> str:
         query = f" | Query: `{step.query}`" if step.query else ""
         lines.append(f"**{index}. {label}**{query}\n\n{step.content}")
     return "\n\n".join(lines)
+
+
+def render_relationship_edges(edges: list[dict[str, Any]]) -> None:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        grouped.setdefault(str(edge.get("relation", "RELATED")), []).append(edge)
+
+    for relation in sorted(grouped):
+        st.write(f"**{relation}**")
+        for edge in sorted(grouped[relation], key=lambda item: int(item.get("chapter", 0))):
+            evidence = str(edge.get("evidence") or edge.get("description") or "").strip()
+            st.write(
+                f"Chapter {edge.get('chapter')}: {edge.get('from')} {edge.get('relation')} {edge.get('to')} - \"{evidence}\""
+            )
 
 
 st.markdown(
@@ -545,6 +568,25 @@ with tabs[1]:
                             st.error(f"Batch summary failed: {exc}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
+        st.divider()
+        st.subheader("Relationship Viewer")
+        graph_path = base_dir / GRAPH_INDEX_PATH
+        if not graph_path.exists():
+            st.info("No relationship graph yet.")
+            if st.button("Build relationship graph", use_container_width=True):
+                try:
+                    path = build_graph(base_dir)
+                    st.success(f"Saved {path.name}.")
+                except Exception as exc:
+                    st.error(f"Graph build failed: {exc}")
+        else:
+            graph_names = load_graph_character_names(base_dir)
+            if not graph_names:
+                st.info("No relationship nodes found.")
+            else:
+                selected_graph_name = st.selectbox("Character or faction", graph_names)
+                render_relationship_edges(query_graph(base_dir, selected_graph_name))
+
 with tabs[2]:
     novels = load_novels(output_root)
     if not novels:
@@ -612,6 +654,7 @@ with tabs[3]:
                 )
             )
             rerank_enabled = st.checkbox("Enable Re-ranking", value=False)
+            include_graph = st.checkbox("Include Relationship Graph", value=False)
             question = st.text_input("Question", placeholder="Who is Arn?")
             top_k = st.slider(
                 "Retrieved context count",
@@ -665,6 +708,7 @@ with tabs[3]:
                                         retrieval_mode=retrieval_mode,
                                         rerank=rerank_enabled,
                                         top_k=10 if rerank_enabled else int(top_k),
+                                        include_graph=include_graph,
                                     )
                                 )
                                 result = agent.ask(
