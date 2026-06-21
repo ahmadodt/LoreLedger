@@ -52,6 +52,7 @@ def test_build_rag_index_uses_summaries_characters_and_chapters(tmp_path: Path):
     index = read_json(path)
     source_types = {document["source_type"] for document in index["documents"]}
     assert source_types == {"summary", "character", "chapter"}
+    assert (tmp_path / "indexes" / "graph.json").exists()
 
 
 def test_build_rag_index_includes_structured_event_details(tmp_path: Path):

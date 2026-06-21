@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+from .graph import build_graph
 from .io import read_json, write_json
 from .paths import ensure_novel_dirs
 from .scraper import iter_chapter_files
@@ -107,6 +108,7 @@ class FakeStoryAnswerer:
 
 def build_rag_index(base_dir: Path, force: bool = False) -> Path:
     ensure_novel_dirs(base_dir)
+    build_graph(base_dir)
     index_path = base_dir / RAG_INDEX_PATH
     if index_path.exists() and not force:
         return index_path
@@ -125,6 +127,7 @@ def build_rag_index(base_dir: Path, force: bool = False) -> Path:
 
 def build_embedding_index(base_dir: Path, force: bool = False) -> Path:
     ensure_novel_dirs(base_dir)
+    build_graph(base_dir)
     index_path = base_dir / EMBEDDING_INDEX_PATH
     if index_path.exists() and not force:
         return index_path
@@ -163,6 +166,7 @@ def build_embedding_index(base_dir: Path, force: bool = False) -> Path:
 
 def build_bm25_index(base_dir: Path, force: bool = False) -> Path:
     ensure_novel_dirs(base_dir)
+    build_graph(base_dir)
     index_path = base_dir / BM25_INDEX_PATH
     if index_path.exists() and not force:
         return index_path
