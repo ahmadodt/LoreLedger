@@ -6,10 +6,12 @@ from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
 from novel_memory.rag import (
     BM25_INDEX_VERSION,
+    ConversationTurn,
     EMBEDDING_MODEL_NAME,
     FakeStoryAnswerer,
     LlamaCppStoryAnswerer,
     answer_question,
+    build_answer_prompt,
     build_bm25_index,
     build_embedding_index,
     build_rag_index,
@@ -303,6 +305,23 @@ def test_answer_question_includes_chapter_references(tmp_path: Path):
 
     assert "Chapter 1 - The Arena" in result["answer"]
     assert result["references"]
+
+
+def test_build_answer_prompt_includes_conversation_history():
+    prompt = build_answer_prompt(
+        "What happened after that?",
+        [_context("chapter:0002:001", 2, "Mira warns Arn.")],
+        conversation_history=[
+            ConversationTurn(question="Who is Arn?", answer="Arn is an arena survivor."),
+            ConversationTurn(question="Who helped him?", answer="Mira helped him."),
+        ],
+    )
+
+    assert "Conversation history:" in prompt
+    assert "Turn 1 user: Who is Arn?" in prompt
+    assert "Turn 1 assistant: Arn is an arena survivor." in prompt
+    assert "Turn 2 user: Who helped him?" in prompt
+    assert "Turn 2 assistant: Mira helped him." in prompt
 
 
 def test_answer_question_reports_missing_context(tmp_path: Path):

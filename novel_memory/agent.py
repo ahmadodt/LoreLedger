@@ -5,11 +5,12 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 from .graph import GRAPH_INDEX_PATH, query_graph
 from .io import read_json
 from .rag import (
+    ConversationTurn,
     RetrievedContext,
     StoryAnswerer,
     _ensure_references,
@@ -54,6 +55,7 @@ class Agent(Protocol):
         question: str,
         answerer: StoryAnswerer,
         on_step: Callable[[AgentStep], None] | None = None,
+        conversation_history: Sequence[ConversationTurn] | None = None,
     ) -> AgentResult:
         ...
 
@@ -68,6 +70,7 @@ class SimpleRAGAgent:
         question: str,
         answerer: StoryAnswerer,
         on_step: Callable[[AgentStep], None] | None = None,
+        conversation_history: Sequence[ConversationTurn] | None = None,
     ) -> AgentResult:
         contexts = retrieve_story_context(
             base_dir,
@@ -85,7 +88,7 @@ class SimpleRAGAgent:
             )
         ]
         _emit_step(steps[-1], on_step)
-        return _answer_from_contexts(question, contexts, answerer, steps)
+        return _answer_from_contexts(question, contexts, answerer, steps, conversation_history)
 
 
 @dataclass
@@ -99,6 +102,7 @@ class ReActAgent:
         question: str,
         answerer: StoryAnswerer,
         on_step: Callable[[AgentStep], None] | None = None,
+        conversation_history: Sequence[ConversationTurn] | None = None,
     ) -> AgentResult:
         steps: list[AgentStep] = []
         accumulated_contexts: list[RetrievedContext] = []
@@ -144,7 +148,7 @@ class ReActAgent:
                 _extend_unique_contexts(accumulated_contexts, seen_context_ids, graph_contexts)
             next_query = refined_query
 
-        return _answer_from_contexts(question, accumulated_contexts, answerer, steps)
+        return _answer_from_contexts(question, accumulated_contexts, answerer, steps, conversation_history)
 
 
 @dataclass
@@ -158,6 +162,7 @@ class PlanAndExecuteAgent:
         question: str,
         answerer: StoryAnswerer,
         on_step: Callable[[AgentStep], None] | None = None,
+        conversation_history: Sequence[ConversationTurn] | None = None,
     ) -> AgentResult:
         steps: list[AgentStep] = []
         plan = _build_plan(answerer, question, self.max_steps)
@@ -193,13 +198,14 @@ class PlanAndExecuteAgent:
                 graph_contexts = _query_graph_contexts(base_dir, question, item, steps, on_step)
                 _extend_unique_contexts(accumulated_contexts, seen_context_ids, graph_contexts)
 
-        return _answer_from_contexts(question, accumulated_contexts, answerer, steps)
+        return _answer_from_contexts(question, accumulated_contexts, answerer, steps, conversation_history)
 
 
 @dataclass
 class FakeAgent:
     answer: str = "Fake agent answer."
     references: list[str] = field(default_factory=lambda: ["Chapter 1 - Fake"])
+    received_history: list[ConversationTurn] = field(default_factory=list)
 
     def ask(
         self,
@@ -207,7 +213,9 @@ class FakeAgent:
         question: str,
         answerer: StoryAnswerer,
         on_step: Callable[[AgentStep], None] | None = None,
+        conversation_history: Sequence[ConversationTurn] | None = None,
     ) -> AgentResult:
+        self.received_history = list(conversation_history or [])
         step = AgentStep(kind="final", content=f"Fake answer for: {question}")
         _emit_step(step, on_step)
         return AgentResult(answer=self.answer, references=list(self.references), contexts=[], steps=[step])
@@ -225,6 +233,7 @@ class FakePlanAndExecuteAgent:
         question: str,
         answerer: StoryAnswerer,
         on_step: Callable[[AgentStep], None] | None = None,
+        conversation_history: Sequence[ConversationTurn] | None = None,
     ) -> AgentResult:
         steps = [AgentStep(kind="plan", content="\n".join(self.plan))]
         _emit_step(steps[-1], on_step)
@@ -243,17 +252,30 @@ def _answer_from_contexts(
     contexts: list[RetrievedContext],
     answerer: StoryAnswerer,
     steps: list[AgentStep],
+    conversation_history: Sequence[ConversationTurn] | None = None,
 ) -> AgentResult:
     if not contexts:
         final_step = AgentStep(kind="final", content=INSUFFICIENT_CONTEXT_ANSWER)
         steps.append(final_step)
         return AgentResult(answer=INSUFFICIENT_CONTEXT_ANSWER, references=[], contexts=[], steps=steps)
 
-    answer = answerer.answer_question(question, contexts).strip()
+    answer = _answer_question(answerer, question, contexts, conversation_history).strip()
     references = _unique_references(contexts)
     answer = _ensure_references(answer, references)
     steps.append(AgentStep(kind="final", content=answer, contexts=contexts))
     return AgentResult(answer=answer, references=references, contexts=contexts, steps=steps)
+
+
+def _answer_question(
+    answerer: StoryAnswerer,
+    question: str,
+    contexts: list[RetrievedContext],
+    conversation_history: Sequence[ConversationTurn] | None,
+) -> str:
+    try:
+        return answerer.answer_question(question, contexts, conversation_history=conversation_history)
+    except TypeError:
+        return answerer.answer_question(question, contexts)
 
 
 def _query_graph_contexts(

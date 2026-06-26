@@ -13,6 +13,7 @@ from novel_memory.io import read_json
 from novel_memory.memory import character_summary_until
 from novel_memory.paths import OUTPUT_ROOT, ensure_novel_dirs, novel_dir
 from novel_memory.rag import (
+    ConversationTurn,
     FakeStoryAnswerer,
     LlamaCppStoryAnswerer,
     build_bm25_index,
@@ -26,6 +27,7 @@ from novel_memory.rag import (
 )
 from novel_memory.scraper import iter_chapter_files, scrape_royalroad
 from novel_memory.summarization_jobs import (
+    cancel_summarization_job,
     elapsed_seconds,
     get_summarization_status,
     start_summarization_job,
@@ -191,6 +193,8 @@ def render_job_status(status: dict[str, Any]) -> None:
         st.progress(completed / total if total else 0.0)
     elif state == "finished":
         st.success("Summarization finished.")
+    elif state == "cancelled":
+        st.warning("Summarization stopped.")
     elif state == "failed":
         st.error(f"Summarization failed: {status.get('error')}")
     elif state == "stale":
@@ -268,6 +272,46 @@ AGENT_MODES = {
     "ReAct": ReActAgent,
     "Plan and Execute": PlanAndExecuteAgent,
 }
+ASK_CONVERSATION_HISTORY_KEY = "ask_conversation_history"
+MAX_CONVERSATION_TURNS = 5
+
+
+def get_conversation_history() -> list[ConversationTurn]:
+    raw_history = st.session_state.setdefault(ASK_CONVERSATION_HISTORY_KEY, [])
+    history = []
+    for turn in raw_history[-MAX_CONVERSATION_TURNS:]:
+        if isinstance(turn, ConversationTurn):
+            history.append(turn)
+        elif isinstance(turn, dict):
+            history.append(
+                ConversationTurn(
+                    question=str(turn.get("question", "")),
+                    answer=str(turn.get("answer", "")),
+                )
+            )
+    return history
+
+
+def append_conversation_turn(question: str, answer: str) -> None:
+    raw_history = list(st.session_state.setdefault(ASK_CONVERSATION_HISTORY_KEY, []))
+    raw_history.append({"question": question, "answer": answer})
+    st.session_state[ASK_CONVERSATION_HISTORY_KEY] = raw_history[-MAX_CONVERSATION_TURNS:]
+
+
+def reset_conversation_history() -> None:
+    st.session_state[ASK_CONVERSATION_HISTORY_KEY] = []
+
+
+def render_conversation_history(history: list[ConversationTurn]) -> None:
+    st.write("Conversation")
+    if not history:
+        st.caption("No conversation yet.")
+        return
+    for turn in history:
+        with st.chat_message("user"):
+            st.write(turn.question)
+        with st.chat_message("assistant"):
+            st.write(turn.answer)
 
 
 def render_agent_steps(steps: list[Any]) -> str:
@@ -508,6 +552,13 @@ with tabs[1]:
 
                 if job_status:
                     render_job_status(job_status)
+                    if job_running and st.button("Stop summarization", use_container_width=True):
+                        try:
+                            cancel_summarization_job(base_dir)
+                            st.warning("Stop requested. The current chapter will finish before the model unloads.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Stop failed: {exc}")
 
                 if not summarization_enabled:
                     st.info("Summarization is disabled. Enable it in the sidebar to generate summaries.")
@@ -632,6 +683,13 @@ with tabs[3]:
         left, right = st.columns([1.1, 0.9], gap="large")
         with left:
             st.subheader("Ask a question")
+            conversation_enabled = st.checkbox("Enable Conversation History", value=True)
+            if st.button("New Conversation", use_container_width=True):
+                reset_conversation_history()
+                st.rerun()
+            conversation_history = get_conversation_history() if conversation_enabled else []
+            if conversation_enabled:
+                render_conversation_history(conversation_history)
             agent_label = st.selectbox("Agent Mode", list(AGENT_MODES))
             retrieval_label = st.radio(
                 "Retrieval mode",
@@ -719,6 +777,7 @@ with tabs[3]:
                                         agent_steps.append(step),
                                         reasoning_placeholder.markdown(render_agent_steps(agent_steps)),
                                     ),
+                                    conversation_history=conversation_history if conversation_enabled else None,
                                 )
                             finally:
                                 close = getattr(answerer, "close", None)
@@ -726,9 +785,11 @@ with tabs[3]:
                                     close()
                         reasoning_placeholder.markdown(render_agent_steps(result.steps))
                         st.caption(
-                            f"Agent: {agent_label} | Retrieval: {retrieval_label} | Re-ranking: {'on' if rerank_enabled else 'off'}"
+                            f"Agent: {agent_label} | Retrieval: {retrieval_label} | Re-ranking: {'on' if rerank_enabled else 'off'} | Graph: {'on' if include_graph else 'off'}"
                         )
                         st.write(result.answer)
+                        if conversation_enabled:
+                            append_conversation_turn(question.strip(), result.answer)
                     except Exception as exc:
                         st.error(f"Question failed: {exc}")
 

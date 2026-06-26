@@ -3,7 +3,7 @@ from pathlib import Path
 from novel_memory.agent import AgentConfig, FakeAgent, FakePlanAndExecuteAgent, PlanAndExecuteAgent, ReActAgent, SimpleRAGAgent
 from novel_memory.io import write_json
 from novel_memory.paths import ensure_novel_dirs
-from novel_memory.rag import RetrievedContext
+from novel_memory.rag import ConversationTurn, RetrievedContext
 
 
 def test_simple_rag_agent_answers_with_citations(monkeypatch, tmp_path: Path):
@@ -40,6 +40,17 @@ def test_simple_rag_agent_answers_with_citations(monkeypatch, tmp_path: Path):
     ]
 
 
+def test_simple_rag_agent_passes_conversation_history(monkeypatch, tmp_path: Path):
+    context = _context("chapter:0001:001", 1, "Arn survives the arena.")
+    monkeypatch.setattr("novel_memory.agent.retrieve_story_context", lambda *_args, **_kwargs: [context])
+    answerer = FakeAnswerer("Arn is a survivor.")
+    history = [ConversationTurn(question="Who is Mira?", answer="Mira is a healer.")]
+
+    SimpleRAGAgent(AgentConfig()).ask(tmp_path, "What about Arn?", answerer, conversation_history=history)
+
+    assert answerer.conversation_history == history
+
+
 def test_react_agent_retrieves_then_answers(monkeypatch, tmp_path: Path):
     calls = []
 
@@ -65,6 +76,25 @@ def test_react_agent_retrieves_then_answers(monkeypatch, tmp_path: Path):
     assert calls == [("Mira patron warning", 4, "semantic", True)]
     assert [step.kind for step in result.steps[:4]] == ["think", "act", "observe", "think"]
     assert [step.kind for step in steps] == ["think", "act", "observe", "think"]
+
+
+def test_react_agent_passes_conversation_history(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        "novel_memory.agent.retrieve_story_context",
+        lambda *_args, **_kwargs: [_context("chapter:0001:001", 1, "Arn survives the arena.")],
+    )
+    answerer = ScriptedAnswerer(
+        decisions=[
+            '{"thought": "Find Arn.", "action": "retrieve", "query": "Arn"}',
+            '{"thought": "The context is enough.", "action": "answer"}',
+        ],
+        answer="Arn is a survivor.",
+    )
+    history = [ConversationTurn(question="Who is Mira?", answer="Mira is a healer.")]
+
+    ReActAgent(AgentConfig()).ask(tmp_path, "What about Arn?", answerer, conversation_history=history)
+
+    assert answerer.conversation_history == history
 
 
 def test_react_agent_forces_final_answer_after_three_loops(monkeypatch, tmp_path: Path):
@@ -169,6 +199,19 @@ def test_plan_and_execute_agent_generates_plan_and_retrieves_each_step(monkeypat
     assert [step.kind for step in steps[:4]] == ["plan", "act", "observe", "act"]
 
 
+def test_plan_and_execute_agent_passes_conversation_history(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        "novel_memory.agent.retrieve_story_context",
+        lambda *_args, **_kwargs: [_context("chapter:0001:001", 1, "Arn survives the arena.")],
+    )
+    answerer = ScriptedAnswerer(decisions=['["Find Arn"]'], answer="Arn is a survivor.")
+    history = [ConversationTurn(question="Who is Mira?", answer="Mira is a healer.")]
+
+    PlanAndExecuteAgent(AgentConfig()).ask(tmp_path, "What about Arn?", answerer, conversation_history=history)
+
+    assert answerer.conversation_history == history
+
+
 def test_plan_and_execute_agent_includes_graph_context(monkeypatch, tmp_path: Path):
     _write_agent_graph(tmp_path)
     graph_calls = []
@@ -265,8 +308,10 @@ def test_fake_plan_and_execute_agent_returns_predictable_output(tmp_path: Path):
 class FakeAnswerer:
     def __init__(self, answer: str):
         self.answer = answer
+        self.conversation_history = None
 
-    def answer_question(self, _question, _contexts):
+    def answer_question(self, _question, _contexts, conversation_history=None):
+        self.conversation_history = conversation_history
         return self.answer
 
 

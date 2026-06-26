@@ -41,8 +41,19 @@ class RetrievedContext:
         return f"Chapter {self.chapter_number} - {self.chapter_title}"
 
 
+@dataclass(frozen=True)
+class ConversationTurn:
+    question: str
+    answer: str
+
+
 class StoryAnswerer(Protocol):
-    def answer_question(self, question: str, contexts: list[RetrievedContext]) -> str:
+    def answer_question(
+        self,
+        question: str,
+        contexts: list[RetrievedContext],
+        conversation_history: Sequence[ConversationTurn] | None = None,
+    ) -> str:
         ...
 
 
@@ -71,8 +82,16 @@ class LlamaCppStoryAnswerer:
             verbose=False,
         )
 
-    def answer_question(self, question: str, contexts: list[RetrievedContext]) -> str:
-        return self.complete_prompt(build_answer_prompt(question, contexts), stop=["</answer>"])
+    def answer_question(
+        self,
+        question: str,
+        contexts: list[RetrievedContext],
+        conversation_history: Sequence[ConversationTurn] | None = None,
+    ) -> str:
+        return self.complete_prompt(
+            build_answer_prompt(question, contexts, conversation_history=conversation_history),
+            stop=["</answer>"],
+        )
 
     def complete_prompt(
         self,
@@ -99,7 +118,12 @@ class LlamaCppStoryAnswerer:
 
 
 class FakeStoryAnswerer:
-    def answer_question(self, question: str, contexts: list[RetrievedContext]) -> str:
+    def answer_question(
+        self,
+        question: str,
+        contexts: list[RetrievedContext],
+        conversation_history: Sequence[ConversationTurn] | None = None,
+    ) -> str:
         if not contexts:
             return "I do not have enough stored context to answer that."
         references = ", ".join(context.reference for context in contexts[:2])
@@ -348,6 +372,7 @@ def answer_question(
     top_k: int = 5,
     retrieval_mode: str = "tfidf",
     rerank: bool = False,
+    conversation_history: Sequence[ConversationTurn] | None = None,
 ) -> dict[str, Any]:
     contexts = retrieve_story_context(base_dir, question, top_k=top_k, retrieval_mode=retrieval_mode, rerank=rerank)
     if not contexts:
@@ -357,7 +382,7 @@ def answer_question(
             "contexts": [],
         }
 
-    answer = answerer.answer_question(question, contexts).strip()
+    answer = answerer.answer_question(question, contexts, conversation_history=conversation_history).strip()
     references = _unique_references(contexts)
     answer = _ensure_references(answer, references)
     return {
@@ -416,7 +441,12 @@ def rerank_contexts(question: str, contexts: list[RetrievedContext], top_k: int 
     return reranked[:top_k]
 
 
-def build_answer_prompt(question: str, contexts: list[RetrievedContext]) -> str:
+def build_answer_prompt(
+    question: str,
+    contexts: list[RetrievedContext],
+    conversation_history: Sequence[ConversationTurn] | None = None,
+) -> str:
+    history_text = _conversation_history_text(conversation_history)
     context_text = "\n\n".join(
         f"[{context.reference} | {context.source_type}]\n{context.text}" for context in contexts
     )
@@ -426,6 +456,9 @@ Answer the user's question using only the retrieved context below.
 If the context is insufficient, say that the stored context is not enough.
 Include chapter references in the answer.
 
+Conversation history:
+{history_text}
+
 Question:
 {question}
 
@@ -434,6 +467,20 @@ Retrieved context:
 
 Answer:
 """
+
+
+def _conversation_history_text(conversation_history: Sequence[ConversationTurn] | None) -> str:
+    if not conversation_history:
+        return "No prior conversation."
+    lines = []
+    for index, turn in enumerate(conversation_history[-5:], start=1):
+        question = str(getattr(turn, "question", "")).strip()
+        answer = str(getattr(turn, "answer", "")).strip()
+        if not question and not answer:
+            continue
+        lines.append(f"Turn {index} user: {question}")
+        lines.append(f"Turn {index} assistant: {answer}")
+    return "\n".join(lines) if lines else "No prior conversation."
 
 
 def _rag_documents(base_dir: Path) -> list[dict[str, Any]]:
