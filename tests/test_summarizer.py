@@ -9,7 +9,7 @@ import pytest
 from novel_memory import power
 from novel_memory.io import read_json, write_json
 from novel_memory.paths import ensure_novel_dirs
-from novel_memory.summarization_jobs import get_summarization_status, start_summarization_job
+from novel_memory.summarization_jobs import cancel_summarization_job, get_summarization_status, start_summarization_job
 from novel_memory.summarizer import (
     ExtractionAttemptsError,
     FakeSummarizer,
@@ -856,6 +856,64 @@ def test_background_job_tracks_failed_chapters_and_finishes(tmp_path: Path, monk
     assert status["failed"] == 1
     assert status["failed_chapters"] == [1]
     assert status["completed"] == 2
+
+
+def test_background_summarization_job_can_be_cancelled_between_chapters(tmp_path: Path, monkeypatch):
+    _write_chapters(tmp_path, count=3)
+    instances = []
+
+    class SlowSummarizer:
+        def __init__(self, **_kwargs):
+            self.closed = False
+            instances.append(self)
+
+        def summarize_chapter(self, chapter, previous_summary):
+            time.sleep(0.2)
+            return {
+                "chapter_summary": {"situation": f"Summary {chapter['number']}", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
+                "important_events": [],
+                "characters": [],
+            }
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("novel_memory.summarization_jobs.LlamaCppSummarizer", SlowSummarizer)
+
+    status = start_summarization_job(
+        tmp_path,
+        novel_slug="example",
+        model_config={
+            "model_repo": "example/model-GGUF",
+            "model_file": "model.gguf",
+            "context_size": 2048,
+            "gpu_layers": 0,
+            "temperature": 0.2,
+        },
+        start_chapter=1,
+        end_chapter=3,
+    )
+
+    for _ in range(50):
+        status = get_summarization_status(tmp_path) or status
+        if status.get("current_chapter") == 1 and status.get("step") == "generating summary":
+            break
+        time.sleep(0.02)
+
+    cancel_status = cancel_summarization_job(tmp_path)
+    assert cancel_status["cancel_requested"] is True
+
+    for _ in range(50):
+        status = get_summarization_status(tmp_path) or status
+        if status["status"] != "running":
+            break
+        time.sleep(0.02)
+
+    assert status["status"] == "cancelled"
+    assert status["completed"] == 1
+    assert instances and instances[0].closed is True
+    assert (tmp_path / "summaries" / "chapter_0001.json").exists()
+    assert not (tmp_path / "summaries" / "chapter_0002.json").exists()
 
 
 def _write_chapters(base_dir: Path, count: int) -> None:

@@ -20,6 +20,7 @@ class Summarizer(Protocol):
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
+CancelCallback = Callable[[], bool]
 MAX_EXTRACTION_ATTEMPTS = 3
 PREVIOUS_SUMMARY_LIMIT = 5
 TARGET_EVIDENCE_WORDS = 25
@@ -621,6 +622,7 @@ def summarize_chapter_range(
     end_chapter: int | None = None,
     force: bool = False,
     progress: ProgressCallback | None = None,
+    should_cancel: CancelCallback | None = None,
 ) -> list[Path]:
     ensure_novel_dirs(base_dir)
     saved_paths: list[Path] = []
@@ -643,6 +645,16 @@ def summarize_chapter_range(
 
     for index, (_chapter_file, chapter) in enumerate(selected_chapters, start=1):
         chapter_number = int(chapter["number"])
+        if should_cancel is not None and should_cancel():
+            _emit_progress(
+                progress,
+                "cancelled",
+                chapter_number=chapter_number,
+                completed=index - 1,
+                total=len(selected_chapters),
+            )
+            break
+
         _emit_progress(
             progress,
             "preparing chapter",

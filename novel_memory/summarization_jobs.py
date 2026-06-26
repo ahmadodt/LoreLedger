@@ -20,6 +20,7 @@ STATUS_PATH = Path("indexes") / "summarization_job.json"
 _LOCK = threading.Lock()
 _THREAD: threading.Thread | None = None
 _STATUS: dict[str, Any] | None = None
+_CANCEL_REQUESTED = threading.Event()
 
 
 def start_summarization_job(
@@ -35,6 +36,7 @@ def start_summarization_job(
         if _is_thread_active():
             raise RuntimeError("A summarization job is already running.")
 
+        _CANCEL_REQUESTED.clear()
         chapter_numbers = _chapter_numbers_in_range(base_dir, start_chapter, end_chapter)
         if not chapter_numbers:
             raise ValueError("No chapters were found in the selected range.")
@@ -59,6 +61,7 @@ def start_summarization_job(
             "last_saved_summary": None,
             "error": None,
             "force": bool(force),
+            "cancel_requested": False,
         }
         _set_status(base_dir, status)
 
@@ -71,6 +74,22 @@ def start_summarization_job(
         global _THREAD
         _THREAD = thread
         thread.start()
+        return status.copy()
+
+
+def cancel_summarization_job(base_dir: Path) -> dict[str, Any]:
+    with _LOCK:
+        status = (_STATUS or _read_status_file(base_dir) or {}).copy()
+        if not status or status.get("base_dir") != str(base_dir.resolve()):
+            raise RuntimeError("No summarization job was found for this novel.")
+        if status.get("status") != "running" or not _is_thread_active():
+            raise RuntimeError("No active summarization job is running.")
+
+        _CANCEL_REQUESTED.set()
+        status["cancel_requested"] = True
+        status["step"] = "cancel requested"
+        status["updated_at"] = _now()
+        _set_status(base_dir, status)
         return status.copy()
 
 
@@ -127,6 +146,8 @@ def _run_job(
                     failed_chapters.append(event.get("chapter_number"))
                     updates["failed"] = int((_STATUS or {}).get("failed", 0)) + 1
                     updates["failed_chapters"] = failed_chapters
+                if event["step"] == "cancelled":
+                    updates["cancel_requested"] = True
                 _update_status(base_dir, **updates)
 
             saved_paths = summarize_chapter_range(
@@ -136,7 +157,18 @@ def _run_job(
                 end_chapter=end_chapter,
                 force=force,
                 progress=progress,
+                should_cancel=_CANCEL_REQUESTED.is_set,
             )
+            if _CANCEL_REQUESTED.is_set():
+                _update_status(
+                    base_dir,
+                    status="cancelled",
+                    step="cancelled",
+                    last_saved_summary=(
+                        str(saved_paths[-1]) if saved_paths else (_STATUS or {}).get("last_saved_summary")
+                    ),
+                )
+                return
             _update_status(
                 base_dir,
                 status="finished",
@@ -150,6 +182,7 @@ def _run_job(
             if summarizer is not None:
                 summarizer.close()
             unload_local_models()
+            _CANCEL_REQUESTED.clear()
 
 
 def _chapter_numbers_in_range(base_dir: Path, start_chapter: int, end_chapter: int) -> list[int]:
