@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -23,8 +24,9 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 CancelCallback = Callable[[], bool]
 MAX_EXTRACTION_ATTEMPTS = 3
 PREVIOUS_SUMMARY_LIMIT = 5
-TARGET_EVIDENCE_WORDS = 25
-MAX_EVIDENCE_WORDS = 50
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+LOW_CONFIDENCE_EVIDENCE_THRESHOLD = 0.25
+_EVIDENCE_MODEL: Any | None = None
 EVENT_TYPES = {
     "action",
     "discovery",
@@ -147,7 +149,6 @@ class FakeSummarizer:
                     "description": first_sentence[:200],
                     "event_type": "other",
                     "participants": ["Arn"],
-                    "evidence": first_sentence[:200],
                 }
             )
         return normalize_summary(
@@ -165,7 +166,6 @@ class FakeSummarizer:
                         "name": "Arn",
                         "aliases": [],
                         "update": f"Appears in chapter {chapter['number']} with {len(words)} words of source text.",
-                        "evidence": first_sentence[:200],
                     }
                 ],
             },
@@ -207,13 +207,13 @@ Use this exact JSON shape:
   "pov_character": "Name of the point-of-view character, or null if omniscient or unclear",
   "time_skip": "Any time skip mentioned at the start of this chapter, e.g. '3 days later', or null",
   "locations": [
-    {{"name": "Location name as written in the chapter", "description": "one sentence description", "evidence": "short exact excerpt from the chapter"}}
+    {{"name": "Location name as written in the chapter", "description": "one sentence description"}}
   ],
   "events": [
-    {{"description": "one atomic concrete event or state change", "event_type": "action|discovery|decision|relationship|injury|death|ability|faction|revelation|location|other", "participants": ["Character or entity name"], "evidence": "short exact excerpt from the chapter"}}
+    {{"description": "one atomic concrete event or state change", "event_type": "action|discovery|decision|relationship|injury|death|ability|faction|revelation|location|other", "participants": ["Character or entity name"]}}
   ],
   "characters": [
-    {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter", "evidence": "short exact excerpt from the chapter"}}
+    {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter"}}
   ],
   "continuity_flags": [
     {{"type": "contradiction|resolution|callback", "description": "what was flagged and why", "evidence": "short exact excerpt from the chapter"}}
@@ -236,13 +236,11 @@ time_skip:
 locations:
 - Include every named place that features meaningfully in this chapter.
 - Description should be brief, one sentence max.
-- Evidence must be a short exact excerpt from the chapter, at most 25 words.
 
 events:
-- Include 3 to 10 atomic evidence-backed events or state changes that matter after this chapter.
+- Include 3 to 10 atomic events or state changes that matter after this chapter.
 - Every event must use exactly one event_type from: action, discovery, decision, relationship, injury, death, ability, faction, revelation, location, other.
 - Every event must include participants listing named characters, factions, groups, places, or artifacts directly involved.
-- Every event must include one short evidence excerpt copied exactly from the current chapter text.
 - Do not infer causation. Finding, witnessing, or learning about an event does not mean the character caused it.
 - If a character finds someone already dead, say they found the person dead. Do not claim they killed them.
 
@@ -252,11 +250,6 @@ characters:
 - Character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
 - Do not create entries for generic enemies, crowds, or unnamed incidental people unless their change matters beyond this chapter.
 - Keep names, aliases, titles, groups, places, and artifacts as written in the chapter.
-
-evidence (all fields):
-- Evidence must be the shortest useful clause or sentence from the current chapter text.
-- Prefer at most 25 words. Never exceed 50 words.
-- Never use the previous summary as evidence.
 
 continuity_flags:
 - Compare this chapter against the previous summary and flag anything notable.
@@ -294,17 +287,15 @@ def parse_json_response(text: str) -> dict[str, Any]:
 def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str, Any]:
     chapter_text = str(chapter.get("text", ""))
     chapter_summary = _normalize_chapter_summary(data)
-    events = _normalize_events(data, chapter_text)
+    events = _normalize_events(data)
     characters = []
     for item in data.get("characters", []):
         name = str(item.get("name", "")).strip()
         update = str(item.get("update", "")).strip()
         if not name or not update:
             continue
-        evidence = str(item.get("evidence", "")).strip()
-        _validate_evidence("Character update", name, evidence, chapter_text)
         aliases = [str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]
-        characters.append({"name": name, "aliases": aliases, "update": update, "evidence": evidence})
+        characters.append({"name": name, "aliases": aliases, "update": update})
 
     important_events = [event["description"] for event in events]
     if not important_events:
@@ -314,8 +305,11 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
     pov_character = str(pov_character).strip() if pov_character is not None else None
     time_skip = data.get("time_skip")
     time_skip = str(time_skip).strip() if time_skip is not None else None
-    locations = _normalize_locations(data, chapter_text)
+    locations = _normalize_locations(data)
     continuity_flags = _normalize_continuity_flags(data, chapter_text)
+    _attach_evidence(events, "description", chapter_text)
+    _attach_evidence(characters, "update", chapter_text)
+    _attach_evidence(locations, "description", chapter_text)
 
     summary = {
         "chapter_number": int(chapter["number"]),
@@ -334,7 +328,79 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
     return summary
 
 
-def _normalize_events(data: dict[str, Any], chapter_text: str) -> list[dict[str, Any]]:
+def find_best_evidence(description: str, chapter_text: str) -> str:
+    sentences = _split_sentences(chapter_text)
+    if not sentences:
+        return ""
+
+    model = _get_evidence_model()
+    embeddings = model.encode([description, *sentences], convert_to_numpy=True)
+    description_embedding = _as_vector(embeddings[0])
+    sentence_embeddings = [_as_vector(embedding) for embedding in embeddings[1:]]
+
+    best_index = 0
+    best_score = -1.0
+    for index, sentence_embedding in enumerate(sentence_embeddings):
+        score = _cosine_similarity(description_embedding, sentence_embedding)
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    evidence = sentences[best_index]
+    if best_score < LOW_CONFIDENCE_EVIDENCE_THRESHOLD:
+        return f"LOW_CONFIDENCE: {evidence}"
+    return evidence
+
+
+def _get_evidence_model() -> Any:
+    global _EVIDENCE_MODEL
+    if _EVIDENCE_MODEL is not None:
+        return _EVIDENCE_MODEL
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise RuntimeError(
+            "sentence-transformers is not installed. Install the environment from requirements.txt first."
+        ) from exc
+
+    _EVIDENCE_MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
+    return _EVIDENCE_MODEL
+
+
+def _split_sentences(text: str) -> list[str]:
+    sentences = []
+    for match in re.finditer(r"[^.!?]+(?:[.!?]+|$)", text):
+        sentence = match.group(0).strip()
+        if sentence:
+            sentences.append(sentence)
+    return sentences
+
+
+def _as_vector(value: Any) -> list[float]:
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    return [float(item) for item in value]
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _attach_evidence(items: list[dict[str, Any]], source_field: str, chapter_text: str) -> None:
+    for item in items:
+        evidence = find_best_evidence(str(item.get(source_field, "")), chapter_text).strip()
+        if not evidence:
+            raise RuntimeError("Evidence extraction failed to attach evidence.")
+        item["evidence"] = evidence
+
+
+def _normalize_events(data: dict[str, Any]) -> list[dict[str, Any]]:
     events = []
     raw_events = data.get("events", [])
     if not isinstance(raw_events, list):
@@ -361,14 +427,11 @@ def _normalize_events(data: dict[str, Any], chapter_text: str) -> list[dict[str,
         if _mentions_named_character(description) and not participants:
             raise ValueError(f"Event {index} field 'participants' is required for named-character events.")
 
-        evidence = str(item.get("evidence", "")).strip()
-        _validate_evidence("Event", str(index), evidence, chapter_text)
         events.append(
             {
                 "description": description,
                 "event_type": event_type,
                 "participants": participants,
-                "evidence": evidence,
             }
         )
 
@@ -385,7 +448,7 @@ def _normalize_chapter_summary(data: dict[str, Any]) -> dict[str, Any]:
     return {field: str(raw.get(field, "")).strip() for field in CHAPTER_SUMMARY_FIELDS}
 
 
-def _normalize_locations(data: dict[str, Any], chapter_text: str) -> list[dict[str, Any]]:
+def _normalize_locations(data: dict[str, Any]) -> list[dict[str, Any]]:
     raw = data.get("locations", [])
     if not isinstance(raw, list):
         raise ValueError("Field 'locations' must be an array.")
@@ -397,13 +460,11 @@ def _normalize_locations(data: dict[str, Any], chapter_text: str) -> list[dict[s
         if not name:
             continue
         description = str(item.get("description", "")).strip()
-        evidence = str(item.get("evidence", "")).strip()
-        _validate_evidence("Location", name, evidence, chapter_text)
-        locations.append({"name": name, "description": description, "evidence": evidence})
+        locations.append({"name": name, "description": description})
     return locations
 
 
-def _normalize_continuity_flags(data: dict[str, Any], chapter_text: str) -> list[dict[str, Any]]:
+def _normalize_continuity_flags(data: dict[str, Any], _chapter_text: str) -> list[dict[str, Any]]:
     raw = data.get("continuity_flags", [])
     if not isinstance(raw, list):
         raise ValueError("Field 'continuity_flags' must be an array.")
@@ -420,23 +481,8 @@ def _normalize_continuity_flags(data: dict[str, Any], chapter_text: str) -> list
         if not description:
             continue
         evidence = str(item.get("evidence", "")).strip()
-        if evidence:
-            _validate_evidence("Continuity flag", flag_type, evidence, chapter_text)
         flags.append({"type": flag_type, "description": description, "evidence": evidence})
     return flags
-
-
-def _validate_evidence(kind: str, label: str, evidence: str, chapter_text: str) -> None:
-    if not evidence:
-        raise ValueError(f"{kind} evidence for {label!r} is missing source evidence.")
-
-    if len(evidence.split()) > MAX_EVIDENCE_WORDS:
-        raise ValueError(f"{kind} evidence for {label!r} exceeds {MAX_EVIDENCE_WORDS} words.")
-
-    normalized_evidence = _normalize_evidence_text(evidence)
-    normalized_chapter = _normalize_evidence_text(chapter_text)
-    if normalized_evidence not in normalized_chapter:
-        raise ValueError(f"{kind} evidence for {label!r} was not found in the current chapter text.")
 
 
 def _normalize_evidence_text(value: str) -> str:

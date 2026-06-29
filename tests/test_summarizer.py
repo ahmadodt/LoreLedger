@@ -16,6 +16,7 @@ from novel_memory.summarizer import (
     LlamaCppSummarizer,
     PREVIOUS_SUMMARY_LIMIT,
     build_prompt,
+    find_best_evidence,
     normalize_summary,
     parse_json_response,
     previous_cumulative_summary,
@@ -23,6 +24,15 @@ from novel_memory.summarizer import (
     summarize_chapter_range,
     summarize_novel,
 )
+
+
+@pytest.fixture(autouse=True)
+def fake_evidence_model(monkeypatch):
+    class FakeEvidenceModel:
+        def encode(self, texts, convert_to_numpy=True):
+            return [[1.0, 0.0] for _text in texts]
+
+    monkeypatch.setattr("novel_memory.summarizer._EVIDENCE_MODEL", FakeEvidenceModel())
 
 
 def test_summarize_novel_writes_summary_and_character_memory(tmp_path: Path):
@@ -99,7 +109,6 @@ def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
                         "name": "Arn",
                         "aliases": [],
                         "update": "Meets Mira in chapter 2.",
-                        "evidence": "Arn meets Mira.",
                     }
                 ],
             }
@@ -261,13 +270,13 @@ def test_llama_cpp_summarizer_retries_with_validation_correction(monkeypatch):
     responses = [
         """{
           "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
-          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon defeats the rats."}]
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "fatality", "participants": ["Simon"]}],
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites."}]
         }""",
         """{
           "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
-          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"]}],
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites."}]
         }""",
     ]
 
@@ -288,7 +297,7 @@ def test_llama_cpp_summarizer_retries_with_validation_correction(monkeypatch):
     assert summary["characters"][0]["name"] == "Simon"
     assert len(prompts) == 2
     assert "Correction required after the previous invalid response" in prompts[1]
-    assert "was not found in the current chapter text" in prompts[1]
+    assert "field 'event_type' must be one of" in prompts[1]
 
 
 def test_llama_cpp_summarizer_does_not_retry_inference_errors(monkeypatch):
@@ -343,18 +352,90 @@ def test_build_prompt_guides_strict_story_memory_summary():
     assert "Use only the provided chapter text for new facts" in prompt
     assert "previous cumulative summary only for continuity" in prompt
     assert "one to three sentences" in prompt
-    assert "3 to 10 atomic evidence-backed events" in prompt
+    assert "3 to 10 atomic events" in prompt
     assert "Every event must use exactly one event_type" in prompt
     assert "Every event must include participants" in prompt
     assert "Every event involving a named character whose state changes must have a matching character update" in prompt
     assert "deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations" in prompt
-    assert "evidence excerpt copied exactly from the current chapter text" in prompt
+    assert "EVIDENCE RULE" not in prompt
     assert "finds someone already dead" in prompt
     assert "Chapter 7: The Gate" in prompt
     assert "Chapter 6: Mira finds the gate key." in prompt
 
 
-def test_normalize_summary_accepts_evidence_backed_events_and_derives_important_events():
+def test_find_best_evidence_returns_matching_sentence(monkeypatch):
+    class FakeSentenceTransformer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def encode(self, texts, convert_to_numpy=True):
+            vectors = []
+            for text in texts:
+                if "gate" in text.lower():
+                    vectors.append([1.0, 0.0])
+                else:
+                    vectors.append([0.0, 1.0])
+            return vectors
+
+    monkeypatch.setattr("novel_memory.summarizer._EVIDENCE_MODEL", None)
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    evidence = find_best_evidence(
+        "Mira reveals the gate key is broken.",
+        "Arn sharpens his blade. Mira reveals the gate key is broken.",
+    )
+
+    assert evidence == "Mira reveals the gate key is broken."
+
+
+def test_find_best_evidence_flags_low_confidence(monkeypatch):
+    class FakeSentenceTransformer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def encode(self, texts, convert_to_numpy=True):
+            return [[1.0, 0.0], [0.0, 1.0]]
+
+    monkeypatch.setattr("novel_memory.summarizer._EVIDENCE_MODEL", None)
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    evidence = find_best_evidence("A dragon arrives.", "Arn eats breakfast.")
+
+    assert evidence == "LOW_CONFIDENCE: Arn eats breakfast."
+
+
+def test_find_best_evidence_loads_embedding_model_on_cpu_once(monkeypatch):
+    calls = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name, **kwargs):
+            calls.append((model_name, kwargs))
+
+        def encode(self, texts, convert_to_numpy=True):
+            return [[1.0, 0.0] for _text in texts]
+
+    monkeypatch.setattr("novel_memory.summarizer._EVIDENCE_MODEL", None)
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+
+    assert find_best_evidence("Arn enters.", "Arn enters.") == "Arn enters."
+    assert find_best_evidence("Arn leaves.", "Arn leaves.") == "Arn leaves."
+
+    assert calls == [("sentence-transformers/all-MiniLM-L6-v2", {"device": "cpu"})]
+
+
+def test_normalize_summary_attaches_evidence_and_derives_important_events():
     summary = normalize_summary(
         {
             "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
@@ -363,7 +444,6 @@ def test_normalize_summary_accepts_evidence_backed_events_and_derives_important_
                     "description": "Arn meets Mira.",
                     "event_type": "relationship",
                     "participants": ["Arn", "Mira"],
-                    "evidence": "Arn meets Mira.",
                 }
             ],
             "characters": [
@@ -371,7 +451,6 @@ def test_normalize_summary_accepts_evidence_backed_events_and_derives_important_
                     "name": "Arn",
                     "aliases": [],
                     "update": "Meets Mira.",
-                    "evidence": "Arn meets Mira.",
                 }
             ],
         },
@@ -380,11 +459,15 @@ def test_normalize_summary_accepts_evidence_backed_events_and_derives_important_
 
     assert summary["events"][0]["event_type"] == "relationship"
     assert summary["events"][0]["participants"] == ["Arn", "Mira"]
+    assert summary["events"][0]["evidence"] == "Arn meets Mira."
+    assert summary["characters"][0]["evidence"] == "Arn meets Mira."
     assert summary["important_events"] == ["Arn meets Mira."]
 
 
-def test_normalize_summary_rejects_invalid_event_evidence():
-    with pytest.raises(ValueError, match="Event evidence for '1' was not found"):
+def test_normalize_summary_raises_runtime_error_when_evidence_attachment_fails(monkeypatch):
+    monkeypatch.setattr("novel_memory.summarizer.find_best_evidence", lambda _description, _chapter_text: "")
+
+    with pytest.raises(RuntimeError, match="Evidence extraction failed"):
         normalize_summary(
             {
                 "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
@@ -393,7 +476,6 @@ def test_normalize_summary_rejects_invalid_event_evidence():
                         "description": "Arn meets Mira.",
                         "event_type": "relationship",
                         "participants": ["Arn", "Mira"],
-                        "evidence": "Arn defeats Mira.",
                     }
                 ],
                 "characters": [],
@@ -412,7 +494,6 @@ def test_normalize_summary_rejects_named_event_without_participants():
                         "description": "Arn meets Mira.",
                         "event_type": "relationship",
                         "participants": [],
-                        "evidence": "Arn meets Mira.",
                     }
                 ],
                 "characters": [],
@@ -421,7 +502,14 @@ def test_normalize_summary_rejects_named_event_without_participants():
         )
 
 
-def test_normalize_summary_rejects_major_character_update_without_related_event():
+def test_normalize_summary_rejects_major_character_update_without_related_event(monkeypatch):
+    def fake_find_best_evidence(description, _chapter_text):
+        if "Heals" in description:
+            return "Mira heals after the duel."
+        return "Arn finds a locked door."
+
+    monkeypatch.setattr("novel_memory.summarizer.find_best_evidence", fake_find_best_evidence)
+
     with pytest.raises(ValueError, match="major state change"):
         normalize_summary(
             {
@@ -431,7 +519,6 @@ def test_normalize_summary_rejects_major_character_update_without_related_event(
                         "description": "Arn finds a locked door.",
                         "event_type": "discovery",
                         "participants": ["Arn"],
-                        "evidence": "Arn finds a locked door.",
                     }
                 ],
                 "characters": [
@@ -439,7 +526,6 @@ def test_normalize_summary_rejects_major_character_update_without_related_event(
                         "name": "Mira",
                         "aliases": [],
                         "update": "Heals after the duel.",
-                        "evidence": "Mira heals after the duel.",
                     }
                 ],
             },
@@ -452,13 +538,13 @@ def test_llama_cpp_summarizer_retries_with_event_validation_correction(monkeypat
     responses = [
         """{
           "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon defeats the rats."}],
-          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": "Simon"}],
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites."}]
         }""",
         """{
           "chapter_summary": {"situation": "Simon dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"], "evidence": "Simon dies from rat bites."}],
-          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites.", "evidence": "Simon dies from rat bites."}]
+          "events": [{"description": "Simon dies from rat bites.", "event_type": "death", "participants": ["Simon"]}],
+          "characters": [{"name": "Simon", "aliases": [], "update": "Dies from rat bites."}]
         }""",
     ]
 
@@ -478,7 +564,7 @@ def test_llama_cpp_summarizer_retries_with_event_validation_correction(monkeypat
 
     assert summary["events"][0]["description"] == "Simon dies from rat bites."
     assert len(prompts) == 2
-    assert "Event evidence for '1' was not found in the current chapter text" in prompts[1]
+    assert "field 'participants' must be an array" in prompts[1]
 
 
 def test_normalize_summary_rejects_named_events_without_character_updates():
@@ -498,7 +584,7 @@ def test_normalize_summary_rejects_named_events_without_character_updates():
         )
 
 
-def test_normalize_summary_accepts_whitespace_normalized_evidence():
+def test_normalize_summary_ignores_model_character_evidence():
     summary = normalize_summary(
         {
             "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
@@ -508,61 +594,33 @@ def test_normalize_summary_accepts_whitespace_normalized_evidence():
                     "name": "Arn",
                     "aliases": [],
                     "update": "Meets Mira.",
-                    "evidence": "Arn   meets\nMira.",
+                    "evidence": "Arn defeats Mira.",
                 }
             ],
         },
         _chapter(1, "Arn meets Mira."),
     )
 
-    assert summary["characters"][0]["evidence"] == "Arn   meets\nMira."
+    assert summary["characters"][0]["evidence"] == "Arn meets Mira."
 
 
-def test_normalize_summary_accepts_evidence_with_typographic_punctuation_changes():
+def test_normalize_summary_attaches_location_evidence():
     summary = normalize_summary(
         {
-            "chapter_summary": {"situation": "Arn answers Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-            "important_events": ["Arn answers Mira."],
-            "characters": [
+            "chapter_summary": {"situation": "Arn enters the tower.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
+            "locations": [
                 {
-                    "name": "Arn",
-                    "aliases": [],
-                    "update": "Answers Mira.",
-                    "evidence": "Arn said, \"I won't leave.\"",
+                    "name": "Tower",
+                    "description": "A tower Arn enters.",
                 }
             ],
+            "events": [],
+            "characters": [],
         },
-        _chapter(1, "Arn said, \u201cI won\u2019t leave.\u201d"),
+        _chapter(1, "Arn enters the tower."),
     )
 
-    assert summary["characters"][0]["update"] == "Answers Mira."
-
-
-@pytest.mark.parametrize(
-    ("evidence", "message"),
-    [
-        ("", "missing source evidence"),
-        ("Arn defeats Mira.", "was not found"),
-        (" ".join(["word"] * 51), "exceeds 50 words"),
-    ],
-)
-def test_normalize_summary_rejects_invalid_character_evidence(evidence, message):
-    with pytest.raises(ValueError, match=message):
-        normalize_summary(
-            {
-                "chapter_summary": {"situation": "Arn finds Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-                "important_events": ["Arn finds Mira."],
-                "characters": [
-                    {
-                        "name": "Arn",
-                        "aliases": [],
-                        "update": "Finds Mira.",
-                        "evidence": evidence,
-                    }
-                ],
-            },
-            _chapter(1, "Arn finds Mira already dead beside the road."),
-        )
+    assert summary["locations"][0]["evidence"] == "Arn enters the tower."
 
 
 def test_found_dead_update_preserves_source_attribution():
@@ -575,7 +633,6 @@ def test_found_dead_update_preserves_source_attribution():
                     "name": "Blonde Tavern Maid",
                     "aliases": [],
                     "update": "Simon finds her already dead.",
-                    "evidence": "That was when he noticed the body on the floor.",
                 }
             ],
         },
@@ -702,7 +759,6 @@ def test_chapter_range_logs_failure_and_continues(tmp_path: Path):
                         "name": "Arn",
                         "aliases": [],
                         "update": "Completes chapter 2.",
-                        "evidence": "Arn does thing 2.",
                     }
                 ],
             }
