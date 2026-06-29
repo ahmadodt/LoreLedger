@@ -218,7 +218,7 @@ def local_model_config() -> dict[str, Any]:
         value="TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
     )
     model_file = st.sidebar.text_input("Model file", value="*Q4_K_M.gguf")
-    context_size = st.sidebar.number_input("Context size", min_value=512, max_value=32768, value=16896, step=512)
+    context_size = st.sidebar.number_input("Context size", min_value=512, max_value=32768, value=8192, step=512)
     gpu_layers = st.sidebar.number_input(
         "GPU layers",
         min_value=-1,
@@ -441,6 +441,14 @@ with st.sidebar:
     summarizer_config: dict[str, Any] = {}
     if summarization_enabled:
         force_summary = st.checkbox("Regenerate existing summary", value=False)
+        max_retry_attempts = st.number_input(
+            "Max retry attempts",
+            min_value=1,
+            max_value=3,
+            value=2,
+            step=1,
+            key="max_retry_attempts",
+        )
         summarizer_config = local_model_config()
         if st.button("Unload local model", use_container_width=True):
             unload_local_models()
@@ -576,6 +584,7 @@ with tabs[1]:
                             start_chapter=int(chapter["number"]),
                             end_chapter=int(chapter["number"]),
                             force=force_summary,
+                            max_attempts=int(max_retry_attempts),
                         )
                         st.rerun()
                     except Exception as exc:
@@ -613,6 +622,7 @@ with tabs[1]:
                                 start_chapter=int(start_chapter),
                                 end_chapter=int(end_chapter),
                                 force=force_summary,
+                                max_attempts=int(max_retry_attempts),
                             )
                             st.rerun()
                         except Exception as exc:

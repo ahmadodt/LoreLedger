@@ -4,6 +4,7 @@ import json
 import math
 import re
 import unicodedata
+from inspect import Parameter, signature
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,14 +16,21 @@ from .paths import chapter_path, ensure_novel_dirs, extraction_failure_path, sum
 from .scraper import iter_chapter_files
 
 
+MAX_EXTRACTION_ATTEMPTS = 3
+
+
 class Summarizer(Protocol):
-    def summarize_chapter(self, chapter: dict[str, Any], previous_summary: str | None) -> dict[str, Any]:
+    def summarize_chapter(
+        self,
+        chapter: dict[str, Any],
+        previous_summary: str | None,
+        max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
+    ) -> dict[str, Any]:
         ...
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 CancelCallback = Callable[[], bool]
-MAX_EXTRACTION_ATTEMPTS = 3
 PREVIOUS_SUMMARY_LIMIT = 5
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 LOW_CONFIDENCE_EVIDENCE_THRESHOLD = 0.25
@@ -97,11 +105,16 @@ class LlamaCppSummarizer:
             verbose=False,
         )
 
-    def summarize_chapter(self, chapter: dict[str, Any], previous_summary: str | None) -> dict[str, Any]:
+    def summarize_chapter(
+        self,
+        chapter: dict[str, Any],
+        previous_summary: str | None,
+        max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
+    ) -> dict[str, Any]:
         attempts = []
         correction = None
 
-        for attempt_number in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
+        for attempt_number in range(1, max_attempts + 1):
             prompt = build_prompt(chapter, previous_summary, correction=correction)
             result = self._llm(
                 prompt,
@@ -139,7 +152,12 @@ class LlamaCppSummarizer:
 
 
 class FakeSummarizer:
-    def summarize_chapter(self, chapter: dict[str, Any], previous_summary: str | None) -> dict[str, Any]:
+    def summarize_chapter(
+        self,
+        chapter: dict[str, Any],
+        previous_summary: str | None,
+        max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
+    ) -> dict[str, Any]:
         words = chapter["text"].split()
         first_sentence = chapter["text"].split(".")[0].strip()
         events = []
@@ -622,6 +640,7 @@ def summarize_chapter(
     summarizer: Summarizer,
     force: bool = False,
     progress: ProgressCallback | None = None,
+    max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
 ) -> Path:
     ensure_novel_dirs(base_dir)
     in_path = chapter_path(base_dir, chapter_number)
@@ -638,7 +657,7 @@ def summarize_chapter(
     previous_summary = previous_cumulative_summary(base_dir, chapter_number)
     _emit_progress(progress, "generating summary", chapter_number=chapter_number)
     try:
-        summary = normalize_summary(summarizer.summarize_chapter(chapter, previous_summary), chapter)
+        summary = normalize_summary(_run_summarizer(summarizer, chapter, previous_summary, max_attempts), chapter)
     except ExtractionAttemptsError as exc:
         failure_path = write_extraction_failure(base_dir, chapter, exc)
         _emit_progress(
@@ -657,8 +676,13 @@ def summarize_chapter(
     return out_path
 
 
-def summarize_novel(base_dir: Path, summarizer: Summarizer, force: bool = False) -> list[Path]:
-    return summarize_chapter_range(base_dir, summarizer, force=force)
+def summarize_novel(
+    base_dir: Path,
+    summarizer: Summarizer,
+    force: bool = False,
+    max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
+) -> list[Path]:
+    return summarize_chapter_range(base_dir, summarizer, force=force, max_attempts=max_attempts)
 
 
 def summarize_chapter_range(
@@ -669,6 +693,7 @@ def summarize_chapter_range(
     force: bool = False,
     progress: ProgressCallback | None = None,
     should_cancel: CancelCallback | None = None,
+    max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
 ) -> list[Path]:
     ensure_novel_dirs(base_dir)
     saved_paths: list[Path] = []
@@ -730,7 +755,12 @@ def summarize_chapter_range(
             )
             try:
                 summary = normalize_summary(
-                    summarizer.summarize_chapter(chapter, _format_previous_summaries(previous_summary_lines)),
+                    _run_summarizer(
+                        summarizer,
+                        chapter,
+                        _format_previous_summaries(previous_summary_lines),
+                        max_attempts,
+                    ),
                     chapter,
                 )
             except ExtractionAttemptsError as exc:
@@ -783,3 +813,20 @@ def _emit_progress(progress: ProgressCallback | None, step: str, **payload: Any)
     if progress is None:
         return
     progress({"step": step, **payload})
+
+
+def _run_summarizer(
+    summarizer: Summarizer,
+    chapter: dict[str, Any],
+    previous_summary: str | None,
+    max_attempts: int,
+) -> dict[str, Any]:
+    method = summarizer.summarize_chapter
+    parameters = signature(method).parameters.values()
+    accepts_max_attempts = any(
+        parameter.name == "max_attempts" or parameter.kind == Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if accepts_max_attempts:
+        return method(chapter, previous_summary, max_attempts=max_attempts)
+    return method(chapter, previous_summary)

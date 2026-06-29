@@ -12,7 +12,7 @@ from .io import read_json, write_json
 from .paths import ensure_novel_dirs
 from .power import prevent_system_sleep
 from .scraper import iter_chapter_files
-from .summarizer import LlamaCppSummarizer, summarize_chapter_range
+from .summarizer import MAX_EXTRACTION_ATTEMPTS, LlamaCppSummarizer, summarize_chapter_range
 
 
 STATUS_PATH = Path("indexes") / "summarization_job.json"
@@ -30,6 +30,7 @@ def start_summarization_job(
     start_chapter: int,
     end_chapter: int,
     force: bool = False,
+    max_attempts: int = MAX_EXTRACTION_ATTEMPTS,
 ) -> dict[str, Any]:
     ensure_novel_dirs(base_dir)
     with _LOCK:
@@ -61,13 +62,22 @@ def start_summarization_job(
             "last_saved_summary": None,
             "error": None,
             "force": bool(force),
+            "max_attempts": int(max_attempts),
             "cancel_requested": False,
         }
         _set_status(base_dir, status)
 
         thread = threading.Thread(
             target=_run_job,
-            args=(base_dir, novel_slug, model_config, status["chapter_start"], status["chapter_end"], force),
+            args=(
+                base_dir,
+                novel_slug,
+                model_config,
+                status["chapter_start"],
+                status["chapter_end"],
+                force,
+                int(max_attempts),
+            ),
             name=f"loreledger-summary-{status['job_id']}",
             daemon=True,
         )
@@ -117,6 +127,7 @@ def _run_job(
     start_chapter: int,
     end_chapter: int,
     force: bool,
+    max_attempts: int,
 ) -> None:
     summarizer: LlamaCppSummarizer | None = None
     with prevent_system_sleep():
@@ -158,6 +169,7 @@ def _run_job(
                 force=force,
                 progress=progress,
                 should_cancel=_CANCEL_REQUESTED.is_set,
+                max_attempts=max_attempts,
             )
             if _CANCEL_REQUESTED.is_set():
                 _update_status(
