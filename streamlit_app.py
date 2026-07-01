@@ -393,73 +393,376 @@ def render_relationship_edges(edges: list[dict[str, Any]]) -> None:
 st.markdown(
     """
     <style>
-    .stApp {
-        background: #f8fafc;
-        color: #111827;
+    :root {
+        --ll-bg: #F5F3EE;
+        --ll-sidebar: #EAE7E0;
+        --ll-text: #1C1C1C;
+        --ll-muted: #5F5A52;
+        --ll-accent: #2A6B6B;
+        --ll-accent-hover: #235B5B;
+        --ll-border: #C8C4BC;
+        --ll-panel: #FFFFFF;
+        --ll-shadow: 0 8px 22px rgba(42, 35, 25, 0.08);
+        --ll-success-bg: #E8F5E9;
+        --ll-success-text: #1B5E20;
+        --ll-error-bg: #FDECEA;
+        --ll-error-text: #8A1C1C;
+        --ll-info-bg: #E6F2F2;
+        --ll-info-text: #1F5B5B;
+        --ll-warning-bg: #FFF4D8;
+        --ll-warning-text: #6A4A00;
     }
+
+    .stApp {
+        background: var(--ll-bg);
+        color: var(--ll-text);
+    }
+
     .block-container {
         padding-top: 1.4rem;
         max-width: 1220px;
     }
+
     [data-testid="stSidebar"] {
-        background: #ffffff;
-        border-right: 1px solid #d9e2ec;
+        background: var(--ll-sidebar);
+        border-right: 1px solid rgba(200, 196, 188, 0.8);
     }
+
+    [data-testid="stSidebar"] > div,
+    [data-testid="stSidebar"] section,
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+        background: var(--ll-sidebar);
+    }
+
     [data-testid="stSidebar"] * {
-        color: #111827;
+        color: var(--ll-text);
     }
-    .stApp, .stApp p, .stApp div, .stApp span, .stApp label {
-        color: #111827;
+
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] label *,
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] *,
+    [data-testid="stSidebar"] .stCheckbox label,
+    [data-testid="stSidebar"] .stCheckbox label *,
+    [data-testid="stSidebar"] .stRadio label,
+    [data-testid="stSidebar"] .stRadio label * {
+        color: var(--ll-text);
+        -webkit-text-fill-color: var(--ll-text);
     }
+
+    .stApp,
+    .stApp p,
+    .stApp div,
+    .stApp span,
+    .stApp label,
+    .stApp h1,
+    .stApp h2,
+    .stApp h3,
+    .stApp h4,
+    .stApp h5,
+    .stApp h6,
+    .stMarkdown,
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] p {
+        color: var(--ll-text);
+    }
+
+    .stCaptionContainer,
+    .stCaptionContainer p,
+    small {
+        color: var(--ll-muted);
+    }
+
+    a,
+    a:visited,
+    a:hover {
+        color: var(--ll-accent);
+    }
+
+    hr {
+        border-color: rgba(200, 196, 188, 0.7);
+    }
+
     .stTextInput input,
     .stNumberInput input,
+    .stDateInput input,
+    .stTimeInput input,
     .stTextArea textarea,
-    .stSelectbox div[data-baseweb="select"] > div {
-        background: #ffffff;
-        color: #111827;
-        border-color: #cbd5e1;
+    .stSelectbox div[data-baseweb="select"] > div,
+    .stMultiSelect div[data-baseweb="select"] > div {
+        background: var(--ll-panel);
+        color: var(--ll-text);
+        border: 1px solid var(--ll-border);
+        border-radius: 8px;
+        box-shadow: none;
     }
+
+    .stNumberInput,
+    .stNumberInput > div,
+    .stNumberInput [data-baseweb="input"],
+    .stNumberInput [data-baseweb="input"] > div,
+    .stNumberInput [data-baseweb="input"] input,
+    .stNumberInput button,
+    .stNumberInput button:hover,
+    .stNumberInput button:focus {
+        background: var(--ll-panel);
+        color: var(--ll-text);
+        border-color: var(--ll-border);
+    }
+
+    .stNumberInput [data-baseweb="input"] {
+        border: 1px solid var(--ll-border);
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    .stNumberInput [data-baseweb="input"] > div {
+        border: 0;
+    }
+
+    .stNumberInput button {
+        box-shadow: none;
+        border-left: 1px solid var(--ll-border);
+        border-radius: 0;
+    }
+
+    .stNumberInput button *,
+    .stNumberInput svg {
+        color: var(--ll-text);
+        fill: var(--ll-text);
+        -webkit-text-fill-color: var(--ll-text);
+    }
+
+    .stTextInput input:focus,
+    .stNumberInput input:focus,
+    .stTextArea textarea:focus,
+    .stSelectbox div[data-baseweb="select"] > div:focus-within {
+        border-color: var(--ll-accent);
+        box-shadow: 0 0 0 2px rgba(42, 107, 107, 0.16);
+    }
+
     .stTextArea textarea:disabled {
-        color: #111827;
-        -webkit-text-fill-color: #111827;
-        background: #f8fafc;
+        color: var(--ll-text);
+        -webkit-text-fill-color: var(--ll-text);
+        background: #FBFAF7;
+        border-color: var(--ll-border);
     }
+
+    input::placeholder,
+    textarea::placeholder {
+        color: #7A746B;
+        opacity: 1;
+    }
+
     div[data-testid="stTabs"] button p {
-        color: #111827;
+        color: var(--ll-text);
     }
+
+    div[data-testid="stTabs"] button[aria-selected="true"] {
+        border-bottom-color: var(--ll-accent);
+    }
+
+    div[data-testid="stTabs"] button[aria-selected="true"] p {
+        color: var(--ll-accent);
+        font-weight: 700;
+    }
+
     div[data-testid="stAlert"] * {
-        color: #111827;
+        color: inherit;
     }
+
+    div[data-testid="stAlert"] {
+        border: 0;
+        border-radius: 8px;
+        box-shadow: var(--ll-shadow);
+    }
+
+    div[data-testid="stAlert"][kind="success"],
+    div[data-testid="stAlert"]:has(svg[data-testid="stIconMaterial"][aria-label="check_circle"]) {
+        background: var(--ll-success-bg);
+        color: var(--ll-success-text);
+    }
+
+    div[data-testid="stAlert"][kind="error"],
+    div[data-testid="stAlert"]:has(svg[data-testid="stIconMaterial"][aria-label="error"]) {
+        background: var(--ll-error-bg);
+        color: var(--ll-error-text);
+    }
+
+    div[data-testid="stAlert"][kind="info"],
+    div[data-testid="stAlert"]:has(svg[data-testid="stIconMaterial"][aria-label="info"]) {
+        background: var(--ll-info-bg);
+        color: var(--ll-info-text);
+    }
+
+    div[data-testid="stAlert"][kind="warning"],
+    div[data-testid="stAlert"]:has(svg[data-testid="stIconMaterial"][aria-label="warning"]) {
+        background: var(--ll-warning-bg);
+        color: var(--ll-warning-text);
+    }
+
+    .stButton > button,
+    .stDownloadButton > button,
+    button[kind],
+    button[data-testid="baseButton-secondary"],
+    button[data-testid="baseButton-primary"] {
+        background: var(--ll-accent);
+        border: 1px solid var(--ll-accent);
+        border-radius: 8px;
+        color: #FFFFFF;
+        box-shadow: 0 4px 10px rgba(42, 107, 107, 0.18);
+    }
+
+    .stButton > button *,
+    .stDownloadButton > button *,
+    button[kind] *,
+    button[data-testid="baseButton-secondary"] *,
+    button[data-testid="baseButton-primary"] * {
+        color: #FFFFFF;
+    }
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover,
+    button[kind]:hover,
+    button[data-testid="baseButton-secondary"]:hover,
+    button[data-testid="baseButton-primary"]:hover {
+        background: var(--ll-accent-hover);
+        border-color: var(--ll-accent-hover);
+        color: #FFFFFF;
+    }
+
+    .stButton > button:focus,
+    .stDownloadButton > button:focus,
+    button[kind]:focus,
+    button[data-testid="baseButton-secondary"]:focus,
+    button[data-testid="baseButton-primary"]:focus {
+        box-shadow: 0 0 0 3px rgba(42, 107, 107, 0.22);
+        color: #FFFFFF;
+    }
+
+    .stButton > button:disabled,
+    .stDownloadButton > button:disabled,
+    button[kind]:disabled {
+        background: #9BA8A4;
+        border-color: #9BA8A4;
+        color: #F7F7F5;
+        box-shadow: none;
+    }
+
+    .stCheckbox label,
+    .stRadio label,
+    .stToggle label {
+        color: var(--ll-text);
+        -webkit-text-fill-color: var(--ll-text);
+    }
+
+    .stCheckbox label *,
+    .stRadio label *,
+    .stToggle label *,
+    [data-testid="stCheckbox"] label,
+    [data-testid="stCheckbox"] label *,
+    [data-testid="stRadio"] label,
+    [data-testid="stRadio"] label * {
+        color: var(--ll-text);
+        -webkit-text-fill-color: var(--ll-text);
+    }
+
+    .stCheckbox input:checked + div,
+    .stRadio input:checked + div,
+    .stToggle input:checked + div {
+        border-color: var(--ll-accent);
+        background: var(--ll-accent);
+    }
+
+    .stSlider [data-baseweb="slider"] div[role="slider"] {
+        background: var(--ll-accent);
+        border-color: var(--ll-accent);
+    }
+
+    .stSlider [data-baseweb="slider"] > div > div {
+        background-color: var(--ll-accent);
+    }
+
+    div[data-testid="stProgress"] > div {
+        background: #DAD6CE;
+    }
+
+    div[data-testid="stProgress"] > div > div {
+        background: var(--ll-accent);
+    }
+
     button[kind="primary"] {
-        background: #2563eb;
-        border-color: #2563eb;
-        color: #ffffff;
+        background: var(--ll-accent);
+        border-color: var(--ll-accent);
+        color: #FFFFFF;
     }
+
     button[kind="primary"] p {
-        color: #ffffff;
+        color: #FFFFFF;
     }
+
     div[data-testid="stMetric"] {
-        background: #ffffff;
-        border: 1px solid #d9e2ec;
+        background: var(--ll-panel);
+        border: 0;
         border-radius: 8px;
         padding: 0.85rem 1rem;
+        box-shadow: var(--ll-shadow);
     }
+
+    div[data-testid="stMetric"] label,
+    div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: var(--ll-text);
+    }
+
     .hero {
-        border-bottom: 1px solid #d9e2ec;
+        border-bottom: 1px solid rgba(200, 196, 188, 0.7);
         margin-bottom: 1rem;
         padding-bottom: 0.8rem;
     }
+
     .hero h1 {
         font-size: 2.1rem;
         line-height: 1.05;
         margin-bottom: 0.25rem;
+        color: var(--ll-text);
     }
+
+    .hero div {
+        color: var(--ll-muted);
+    }
+
     .status-card {
-        background: #ffffff;
-        border: 1px solid #d9e2ec;
-        border-left: 5px solid #2563eb;
+        background: var(--ll-panel);
+        border: 0;
+        border-left: 5px solid var(--ll-accent);
         border-radius: 8px;
         padding: 0.9rem 1rem;
+        box-shadow: var(--ll-shadow);
+    }
+
+    .stChatMessage {
+        background: var(--ll-panel);
+        border-radius: 8px;
+        box-shadow: var(--ll-shadow);
+    }
+
+    div[data-testid="stExpander"],
+    div[data-testid="stDataFrame"],
+    div[data-testid="stTable"] {
+        background: var(--ll-panel);
+        border-radius: 8px;
+        box-shadow: var(--ll-shadow);
+    }
+
+    code {
+        background: #EEEAE2;
+        color: var(--ll-text);
+        border-radius: 4px;
+    }
+
+    ::selection {
+        background: rgba(42, 107, 107, 0.22);
+        color: var(--ll-text);
     }
     </style>
     """,
