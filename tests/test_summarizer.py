@@ -86,7 +86,6 @@ def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
                 "consequence": "",
                 "hook": "",
             },
-            "important_events": [],
             "characters": [],
         },
     )
@@ -103,7 +102,6 @@ def test_summarize_chapter_uses_previous_summary_context(tmp_path: Path):
                     "consequence": "",
                     "hook": "",
                 },
-                "important_events": ["Arn meets Mira."],
                 "characters": [
                     {
                         "name": "Arn",
@@ -136,7 +134,6 @@ def test_previous_cumulative_summary_uses_only_five_latest_summaries(tmp_path: P
                     "consequence": "",
                     "hook": "",
                 },
-                "important_events": [],
                 "characters": [],
             },
         )
@@ -169,7 +166,6 @@ def test_previous_cumulative_summary_keeps_all_when_fewer_than_limit(tmp_path: P
                     "consequence": "",
                     "hook": "",
                 },
-                "important_events": [],
                 "characters": [],
             },
         )
@@ -195,7 +191,6 @@ def test_chapter_range_maintains_rolling_five_summary_context(tmp_path: Path):
                     "consequence": "",
                     "hook": "",
                 },
-                "important_events": [],
                 "characters": [],
             }
 
@@ -327,7 +322,6 @@ def test_parse_json_response_allows_trailing_model_text():
         """
         {
           "chapter_summary": "Chloe wakes up.",
-          "important_events": ["Chloe wakes up."],
           "characters": []
         }
         Here is the requested summary.
@@ -352,11 +346,11 @@ def test_build_prompt_guides_strict_story_memory_summary():
     assert "Use only the provided chapter text for new facts" in prompt
     assert "previous cumulative summary only for continuity" in prompt
     assert "one to three sentences" in prompt
-    assert "3 to 10 atomic events" in prompt
+    assert "5 to 10 events" in prompt
     assert "Every event must use exactly one event_type" in prompt
     assert "Every event must include participants" in prompt
     assert "Every event involving a named character whose state changes must have a matching character update" in prompt
-    assert "deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations" in prompt
+    assert "Character updates should capture deaths" in prompt
     assert "EVIDENCE RULE" not in prompt
     assert "finds someone already dead" in prompt
     assert "Chapter 7: The Gate" in prompt
@@ -435,7 +429,7 @@ def test_find_best_evidence_loads_embedding_model_on_cpu_once(monkeypatch):
     assert calls == [("sentence-transformers/all-MiniLM-L6-v2", {"device": "cpu"})]
 
 
-def test_normalize_summary_attaches_evidence_and_derives_important_events():
+def test_normalize_summary_attaches_evidence_to_events_and_characters():
     summary = normalize_summary(
         {
             "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
@@ -461,7 +455,31 @@ def test_normalize_summary_attaches_evidence_and_derives_important_events():
     assert summary["events"][0]["participants"] == ["Arn", "Mira"]
     assert summary["events"][0]["evidence"] == "Arn meets Mira."
     assert summary["characters"][0]["evidence"] == "Arn meets Mira."
-    assert summary["important_events"] == ["Arn meets Mira."]
+
+
+def test_normalize_summary_accepts_lore_event_type():
+    summary = normalize_summary(
+        {
+            "chapter_summary": {
+                "situation": "The rules of magic are strict.",
+                "conflict": "",
+                "turning_point": "",
+                "consequence": "",
+                "hook": "",
+            },
+            "events": [
+                {
+                    "description": "the rules of magic are strict.",
+                    "event_type": "lore",
+                    "participants": [],
+                }
+            ],
+            "characters": [],
+        },
+        _chapter(1, "the rules of magic are strict."),
+    )
+
+    assert summary["events"][0]["event_type"] == "lore"
 
 
 def test_normalize_summary_raises_runtime_error_when_evidence_attachment_fails(monkeypatch):
@@ -567,28 +585,10 @@ def test_llama_cpp_summarizer_retries_with_event_validation_correction(monkeypat
     assert "field 'participants' must be an array" in prompts[1]
 
 
-def test_normalize_summary_rejects_named_events_without_character_updates():
-    with pytest.raises(ValueError, match="important events involving named characters"):
-        normalize_summary(
-            {
-                "chapter_summary": {"situation": "Simon finds the dungeon and dies.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-                "important_events": ["Simon dies from rat bites."],
-                "characters": [],
-            },
-            {
-                "number": 3,
-                "title": "Level One",
-                "url": "https://example.test/3",
-                "text": "Simon dies from rat bites.",
-            },
-        )
-
-
 def test_normalize_summary_ignores_model_character_evidence():
     summary = normalize_summary(
         {
             "chapter_summary": {"situation": "Arn meets Mira.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-            "important_events": ["Arn meets Mira."],
             "characters": [
                 {
                     "name": "Arn",
@@ -627,7 +627,6 @@ def test_found_dead_update_preserves_source_attribution():
     summary = normalize_summary(
         {
             "chapter_summary": {"situation": "Simon finds the tavern maid dead.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-            "important_events": ["Simon finds the tavern maid already dead."],
             "characters": [
                 {
                     "name": "Blonde Tavern Maid",
@@ -657,7 +656,6 @@ def test_summarize_chapter_range_skips_existing_by_default(tmp_path: Path):
                 "consequence": "",
                 "hook": "",
             },
-            "important_events": [],
             "characters": [],
         },
     )
@@ -692,7 +690,6 @@ def test_summarize_chapter_range_regenerates_when_forced(tmp_path: Path):
                 "consequence": "",
                 "hook": "",
             },
-            "important_events": [],
             "characters": [],
         },
     )
@@ -753,7 +750,6 @@ def test_chapter_range_logs_failure_and_continues(tmp_path: Path):
                 )
             return {
                 "chapter_summary": {"situation": "Arn completes chapter 2.", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-                "important_events": ["Arn completes chapter 2."],
                 "characters": [
                     {
                         "name": "Arn",
@@ -832,7 +828,6 @@ def test_background_summarization_job_closes_model(tmp_path: Path, monkeypatch):
         def summarize_chapter(self, chapter, previous_summary):
             return {
                 "chapter_summary": {"situation": f"Summary for {chapter['number']}", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-                "important_events": [],
                 "characters": [],
             }
 
@@ -879,7 +874,6 @@ def test_background_job_tracks_failed_chapters_and_finishes(tmp_path: Path, monk
                 )
             return {
                 "chapter_summary": {"situation": "Summary 2", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-                "important_events": [],
                 "characters": [],
             }
 
@@ -927,7 +921,6 @@ def test_background_summarization_job_can_be_cancelled_between_chapters(tmp_path
             time.sleep(0.2)
             return {
                 "chapter_summary": {"situation": f"Summary {chapter['number']}", "conflict": "", "turning_point": "", "consequence": "", "hook": ""},
-                "important_events": [],
                 "characters": [],
             }
 

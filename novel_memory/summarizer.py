@@ -46,10 +46,10 @@ EVENT_TYPES = {
     "faction",
     "revelation",
     "location",
+    "lore",
     "other",
 }
 CHAPTER_SUMMARY_FIELDS = ("situation", "conflict", "turning_point", "consequence", "hook")
-CONTINUITY_FLAG_TYPES = {"contradiction", "resolution", "callback"}
 MAJOR_CHARACTER_UPDATE_TERMS = {
     "dies",
     "dead",
@@ -223,18 +223,14 @@ Use this exact JSON shape:
     "hook": "What is left unresolved or set up for a future chapter"
   }},
   "pov_character": "Name of the point-of-view character, or null if omniscient or unclear",
-  "time_skip": "Any time skip mentioned at the start of this chapter, e.g. '3 days later', or null",
   "locations": [
     {{"name": "Location name as written in the chapter", "description": "one sentence description"}}
   ],
   "events": [
-    {{"description": "one atomic concrete event or state change", "event_type": "action|discovery|decision|relationship|injury|death|ability|faction|revelation|location|other", "participants": ["Character or entity name"]}}
+    {{"description": "one atomic concrete event or state change", "event_type": "action|discovery|decision|relationship|injury|death|ability|faction|revelation|location|lore|other", "participants": ["Character or entity name"]}}
   ],
   "characters": [
     {{"name": "Character Name", "aliases": ["Optional Alias"], "update": "meaningful character memory update from this chapter"}}
-  ],
-  "continuity_flags": [
-    {{"type": "contradiction|resolution|callback", "description": "what was flagged and why", "evidence": "short exact excerpt from the chapter"}}
   ]
 }}
 
@@ -244,37 +240,44 @@ chapter_summary:
 - Each of the five fields should be one to three sentences.
 - If a field has no supported content, use an empty string.
 - Base every field only on this chapter's text, not the previous summary.
+- Do not invent outcomes not stated in the chapter. If the chapter ends
+  before resolving something, leave consequence and hook reflecting that
+  open state.
 
 pov_character:
 - Use the name as written in the chapter. Use null if the chapter has no clear single POV.
-
-time_skip:
-- Only fill this if the chapter explicitly states a time gap. Use null otherwise.
 
 locations:
 - Include every named place that features meaningfully in this chapter.
 - Description should be brief, one sentence max.
 
 events:
-- Include 3 to 10 atomic events or state changes that matter after this chapter.
-- Every event must use exactly one event_type from: action, discovery, decision, relationship, injury, death, ability, faction, revelation, location, other.
-- Every event must include participants listing named characters, factions, groups, places, or artifacts directly involved.
-- Do not infer causation. Finding, witnessing, or learning about an event does not mean the character caused it.
-- If a character finds someone already dead, say they found the person dead. Do not claim they killed them.
+- Include 5 to 10 events that matter after this chapter.
+- Prioritize events that change something permanently: abilities gained,
+  relationships formed, decisions made, injuries sustained, world rules revealed.
+- Do not include momentary actions with no lasting consequence.
+- Do not invent outcomes that are not explicitly stated in the chapter text.
+  If the chapter ends on a cliffhanger, the outcome is unknown — do not resolve it.
+- Every event must use exactly one event_type from: action, discovery, decision,
+  relationship, injury, death, ability, faction, revelation, location, lore, other.
+- Use lore for any event that explains how the world works — power systems, rules
+  of magic, faction history, world geography, or any information that helps
+  understand the setting.
+- Every event must include participants listing named characters, factions, groups,
+  places, or artifacts directly involved.
+- Do not infer causation. Finding, witnessing, or learning about an event does not
+  mean the character caused it.
+- If a character finds someone already dead, say they found the person dead.
+  Do not claim they killed them.
 
 characters:
 - Include every named character whose state meaningfully changes in this chapter.
 - Every event involving a named character whose state changes must have a matching character update.
-- Character updates should capture deaths, injuries, discoveries, goals, relationships, secrets, abilities, faction changes, or revelations.
-- Do not create entries for generic enemies, crowds, or unnamed incidental people unless their change matters beyond this chapter.
+- Character updates should capture deaths, injuries, discoveries, goals, relationships,
+  secrets, abilities, faction changes, or revelations.
+- Do not create entries for generic enemies, crowds, or unnamed incidental people
+  unless their change matters beyond this chapter.
 - Keep names, aliases, titles, groups, places, and artifacts as written in the chapter.
-
-continuity_flags:
-- Compare this chapter against the previous summary and flag anything notable.
-- contradiction: this chapter states something that conflicts with established facts.
-- resolution: this chapter resolves an unresolved hook or open question from before.
-- callback: this chapter references or pays off something established earlier.
-- If nothing notable, use an empty array.
 {correction_text}
 
 Previous cumulative summary:
@@ -287,6 +290,38 @@ Text:
 
 JSON:
 """
+
+
+# ---------------------------------------------------------------------------
+# Optional prompt modules — not currently injected, available for future use
+# ---------------------------------------------------------------------------
+
+# CONTINUITY_FLAGS_JSON_SHAPE = """
+#   "continuity_flags": [
+#     {{"type": "contradiction|resolution|callback",
+#       "description": "what was flagged and why",
+#       "evidence": "short exact excerpt from the chapter"}}
+#   ],
+# """
+#
+# CONTINUITY_FLAGS_GUIDELINES = """
+# continuity_flags:
+# - Compare this chapter against the previous summary and flag anything notable.
+# - contradiction: this chapter states something that conflicts with established facts.
+# - resolution: this chapter resolves an unresolved hook or open question from before.
+# - callback: this chapter references or pays off something established earlier.
+# - If nothing notable, use an empty array.
+# """
+#
+# TIME_SKIP_JSON_SHAPE = """
+#   "time_skip": "Any time skip mentioned at the start of this chapter,
+#                  e.g. '3 days later', or null",
+# """
+#
+# TIME_SKIP_GUIDELINES = """
+# time_skip:
+# - Only fill this if the chapter explicitly states a time gap. Use null otherwise.
+# """
 
 
 def parse_json_response(text: str) -> dict[str, Any]:
@@ -315,16 +350,9 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
         aliases = [str(alias).strip() for alias in item.get("aliases", []) if str(alias).strip()]
         characters.append({"name": name, "aliases": aliases, "update": update})
 
-    important_events = [event["description"] for event in events]
-    if not important_events:
-        important_events = [str(event).strip() for event in data.get("important_events", []) if str(event).strip()]
-
     pov_character = data.get("pov_character")
     pov_character = str(pov_character).strip() if pov_character is not None else None
-    time_skip = data.get("time_skip")
-    time_skip = str(time_skip).strip() if time_skip is not None else None
     locations = _normalize_locations(data)
-    continuity_flags = _normalize_continuity_flags(data, chapter_text)
     _attach_evidence(events, "description", chapter_text)
     _attach_evidence(characters, "update", chapter_text)
     _attach_evidence(locations, "description", chapter_text)
@@ -335,12 +363,9 @@ def normalize_summary(data: dict[str, Any], chapter: dict[str, Any]) -> dict[str
         "chapter_url": chapter["url"],
         "chapter_summary": chapter_summary,
         "pov_character": pov_character,
-        "time_skip": time_skip,
         "locations": locations,
-        "important_events": important_events,
         "events": events,
         "characters": characters,
-        "continuity_flags": continuity_flags,
     }
     validate_summary(summary)
     return summary
@@ -482,27 +507,6 @@ def _normalize_locations(data: dict[str, Any]) -> list[dict[str, Any]]:
     return locations
 
 
-def _normalize_continuity_flags(data: dict[str, Any], _chapter_text: str) -> list[dict[str, Any]]:
-    raw = data.get("continuity_flags", [])
-    if not isinstance(raw, list):
-        raise ValueError("Field 'continuity_flags' must be an array.")
-    flags = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        flag_type = str(item.get("type", "")).strip().lower()
-        if flag_type not in CONTINUITY_FLAG_TYPES:
-            raise ValueError(
-                f"Continuity flag field 'type' must be one of: {', '.join(sorted(CONTINUITY_FLAG_TYPES))}."
-            )
-        description = str(item.get("description", "")).strip()
-        if not description:
-            continue
-        evidence = str(item.get("evidence", "")).strip()
-        flags.append({"type": flag_type, "description": description, "evidence": evidence})
-    return flags
-
-
 def _normalize_evidence_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     normalized = re.sub(r"[^\w\s]", " ", normalized)
@@ -511,18 +515,6 @@ def _normalize_evidence_text(value: str) -> str:
 
 def validate_summary(summary: dict[str, Any]) -> None:
     _validate_major_character_updates_have_events(summary)
-    important_events = summary.get("important_events", [])
-    if summary.get("characters") or not important_events:
-        return
-
-    named_events = [event for event in important_events if _mentions_named_character(event)]
-    if not named_events:
-        return
-
-    raise ValueError(
-        "Summary has important events involving named characters but no character updates: "
-        + "; ".join(named_events)
-    )
 
 
 def _mentions_named_character(event: Any) -> bool:
