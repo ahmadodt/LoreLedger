@@ -9,7 +9,7 @@ import streamlit as st
 from novel_memory.agent import AgentConfig, PlanAndExecuteAgent, ReActAgent, SimpleRAGAgent
 from novel_memory.env import load_project_env
 from novel_memory.graph import GRAPH_INDEX_PATH, build_graph, query_graph
-from novel_memory.io import read_json
+from novel_memory.io import read_json, write_json
 from novel_memory.memory import character_summary_until
 from novel_memory.paths import OUTPUT_ROOT, ensure_novel_dirs, novel_dir
 from novel_memory.rag import (
@@ -38,6 +38,9 @@ from novel_memory.summarizer import LlamaCppSummarizer
 
 load_project_env()
 st.set_page_config(page_title="LoreLedger", page_icon="LL", layout="wide")
+
+UI_PREFERENCES_FILENAME = ".loreledger_ui.json"
+ACTIVE_NOVEL_SESSION_KEY = "active_novel_slug"
 
 
 def load_novels(output_root: Path = OUTPUT_ROOT) -> list[dict[str, Any]]:
@@ -74,6 +77,54 @@ def load_novels(output_root: Path = OUTPUT_ROOT) -> list[dict[str, Any]]:
         )
 
     return novels
+
+
+def ui_preferences_path(output_root: Path) -> Path:
+    return output_root / UI_PREFERENCES_FILENAME
+
+
+def load_ui_preferences(output_root: Path) -> dict[str, Any]:
+    path = ui_preferences_path(output_root)
+    if not path.exists():
+        return {}
+    try:
+        preferences = read_json(path)
+    except (OSError, ValueError):
+        return {}
+    return preferences if isinstance(preferences, dict) else {}
+
+
+def save_active_novel_slug(output_root: Path, novel_slug: str) -> None:
+    preferences = load_ui_preferences(output_root)
+    if preferences.get(ACTIVE_NOVEL_SESSION_KEY) == novel_slug:
+        return
+    preferences[ACTIVE_NOVEL_SESSION_KEY] = novel_slug
+    write_json(ui_preferences_path(output_root), preferences)
+
+
+def active_novel_index(novels: list[dict[str, Any]], output_root: Path) -> int:
+    slugs = [str(novel["slug"]) for novel in novels]
+    saved_slug = str(load_ui_preferences(output_root).get(ACTIVE_NOVEL_SESSION_KEY) or "")
+    session_slug = str(st.session_state.get(ACTIVE_NOVEL_SESSION_KEY) or "")
+    for slug in (saved_slug, session_slug):
+        if slug in slugs:
+            return slugs.index(slug)
+    return 0
+
+
+def render_active_novel_selector(novels: list[dict[str, Any]], output_root: Path) -> dict[str, Any] | None:
+    if not novels:
+        return None
+    selected_novel = st.selectbox(
+        "Active novel",
+        novels,
+        index=active_novel_index(novels, output_root),
+        format_func=novel_label,
+        key=f"active_novel_selector_{output_root.as_posix()}",
+    )
+    st.session_state[ACTIVE_NOVEL_SESSION_KEY] = selected_novel["slug"]
+    save_active_novel_slug(output_root, str(selected_novel["slug"]))
+    return selected_novel
 
 
 def load_chapters(base_dir: Path) -> list[dict[str, Any]]:
@@ -410,12 +461,6 @@ st.markdown(
         border-radius: 8px;
         padding: 0.9rem 1rem;
     }
-    .summary-panel {
-        background: #ffffff;
-        border: 1px solid #d9e2ec;
-        border-radius: 8px;
-        padding: 1rem;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -434,6 +479,8 @@ st.markdown(
 with st.sidebar:
     st.header("Library")
     output_root = Path(st.text_input("Output folder", value=str(OUTPUT_ROOT)))
+    sidebar_novels = load_novels(output_root)
+    active_novel = render_active_novel_selector(sidebar_novels, output_root)
     st.divider()
     st.header("Summaries")
     summarization_enabled = st.checkbox("Enable summarization", value=False)
@@ -522,11 +569,10 @@ with tabs[0]:
             )
 
 with tabs[1]:
-    novels = load_novels(output_root)
-    if not novels:
+    if active_novel is None:
         st.info("No scraped novels found yet.")
     else:
-        selected_novel = st.selectbox("Novel", novels, format_func=novel_label)
+        selected_novel = active_novel
         base_dir = novel_dir(selected_novel["slug"], output_root)
         ensure_novel_dirs(base_dir)
         chapters = load_chapters(base_dir)
@@ -550,7 +596,6 @@ with tabs[1]:
                 st.text_area("Chapter preview", value=chapter["text"][:4000], height=340, disabled=True)
 
             with action:
-                st.markdown('<div class="summary-panel">', unsafe_allow_html=True)
                 st.subheader("Summarization")
                 summary_path = base_dir / "summaries" / f"chapter_{chapter['number']:04d}.json"
                 if summary_path.exists():
@@ -627,7 +672,6 @@ with tabs[1]:
                             st.rerun()
                         except Exception as exc:
                             st.error(f"Batch summary failed: {exc}")
-                st.markdown("</div>", unsafe_allow_html=True)
 
         st.divider()
         st.subheader("Relationship Viewer")
@@ -649,11 +693,10 @@ with tabs[1]:
                 render_relationship_edges(query_graph(base_dir, selected_graph_name))
 
 with tabs[2]:
-    novels = load_novels(output_root)
-    if not novels:
+    if active_novel is None:
         st.info("No novels available.")
     else:
-        selected_novel = st.selectbox("Novel for memory", novels, format_func=novel_label)
+        selected_novel = active_novel
         base_dir = novel_dir(selected_novel["slug"], output_root)
         chapters = load_chapters(base_dir)
         characters = load_characters(base_dir)
@@ -682,11 +725,10 @@ with tabs[2]:
                 st.error(str(exc))
 
 with tabs[3]:
-    novels = load_novels(output_root)
-    if not novels:
+    if active_novel is None:
         st.info("No novels available.")
     else:
-        selected_novel = st.selectbox("Novel to ask about", novels, format_func=novel_label)
+        selected_novel = active_novel
         base_dir = novel_dir(selected_novel["slug"], output_root)
         ensure_novel_dirs(base_dir)
 
